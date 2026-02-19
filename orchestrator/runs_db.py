@@ -1,6 +1,7 @@
 """SQLite storage for run history (owner, repo, sha, success, html_url, at, output)."""
 import sqlite3
 import os
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # Cap stored log size (match GitHub Checks API limit)
@@ -87,3 +88,14 @@ def get_runs(limit: int = 200) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def archive_runs_older_than(days: int) -> int:
+    """Delete runs with `at` older than the given number of days. Returns number of rows deleted."""
+    path = _db_path()
+    if not path.exists():
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with sqlite3.connect(path) as conn:
+        cur = conn.execute("DELETE FROM runs WHERE at < ?", (cutoff,))
+        return cur.rowcount

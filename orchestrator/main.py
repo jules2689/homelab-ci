@@ -17,7 +17,7 @@ from github_api import get_latest_commit, get_file, list_branches
 from github_checks import create_check_run, complete_check_run
 from github_app import is_github_app_configured, get_installation_token_for_repo
 from job_runner import get_repo_config, run_job
-from runs_db import init_db, record_run as db_record_run
+from runs_db import init_db, record_run as db_record_run, archive_runs_older_than
 
 
 CONFIG_PATH = os.environ.get("CI_LITE_CONFIG", "config.yaml")
@@ -161,7 +161,7 @@ def main():
 
     init_db()
     state = load_state()
-    # state: { "owner/repo": { "branch": last_sha } }
+    # state: { "owner/repo": { "branch": last_sha }, "last_archive_date": "YYYY-MM-DD" }
     for r in repos:
         key = f"{r['owner']}/{r['repo']}"
         if key not in state:
@@ -169,7 +169,18 @@ def main():
 
     logger.info("State: %s", state)
 
+    ARCHIVE_DAYS = 7
+
     while True:
+        # Run archive once per day (first poll after midnight UTC)
+        today_utc = time.strftime("%Y-%m-%d", time.gmtime())
+        if state.get("last_archive_date") != today_utc and not dry_run:
+            n = archive_runs_older_than(ARCHIVE_DAYS)
+            if n > 0:
+                logger.info("Archived %d run(s) older than %d days", n, ARCHIVE_DAYS)
+            state["last_archive_date"] = today_utc
+            save_state(state)
+
         for repo_config in repos:
             owner = repo_config["owner"]
             repo = repo_config["repo"]
