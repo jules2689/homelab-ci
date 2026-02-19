@@ -9,7 +9,8 @@ RUN apk add --no-cache \
     build-base \
     python3 \
     py3-pip \
-    bash
+    bash \
+    util-linux
 
 RUN gem install bundler --no-document 2>/dev/null || true
 
@@ -18,6 +19,8 @@ COPY requirements.txt .
 ENV PIP_ROOT_USER_ACTION=ignore
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN chmod +x /app/run-in-repo.sh
+RUN chmod +x /app/run-in-repo.sh /app/entrypoint.sh
 
+ENV PUID=0 PGID=0
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "main.py"]
