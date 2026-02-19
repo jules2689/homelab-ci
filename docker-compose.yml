@@ -1,0 +1,36 @@
+# Single service: orchestrator + runner in one container. Polls, clones, runs jobs serially (no Docker-in-Docker).
+# Auth: set GitHub App (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY or GITHUB_APP_KEY_PATH) in .env.
+
+services:
+  orchestrator:
+    build: ./orchestrator
+    image: ci-lite:latest
+    working_dir: /app
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./.docker/ci-lite-data:/data
+      - ./.docker/ci-lite-data/key.pem:/data/key.pem:ro
+    environment:
+      - CI_LITE_CONFIG=/app/config.yaml
+      - CI_LITE_STATE=/data/state.json
+      - CI_LITE_DB=/data/runs.db
+      - CI_LITE_WORKSPACE=/data/workspace
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY}
+      - GITHUB_APP_KEY_PATH=${GITHUB_APP_KEY_PATH:-/data/key.pem}
+    command: python main.py
+    restart: unless-stopped
+
+  web:
+    image: python:3.12-alpine
+    working_dir: /app
+    volumes:
+      - ./web:/app
+      - ./.docker/ci-lite-data:/data
+    environment:
+      - CI_LITE_DB=/data/runs.db
+      - CI_LITE_WEB_PORT=8080
+    ports:
+      - "8080:8080"
+    command: python server.py
+    restart: unless-stopped

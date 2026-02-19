@@ -1,0 +1,2 @@
+# Example repo config for CI-Lite (this repo). No-op by default.
+command: true

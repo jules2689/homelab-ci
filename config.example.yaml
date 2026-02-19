@@ -1,0 +1,14 @@
+# Repos to watch. No webhooks: we poll for new commits on the given branch(es).
+repos:
+  - owner: your-org
+    repo: your-repo
+    branch: main
+    # command: "make test"   # optional: override .ci-lite.yml
+  # Watch all branches for a repo (use branch: "*" or branches: all):
+  # - owner: other-org
+  #   repo: other-repo
+  #   branch: "*"
+  #   # or: branches: all
+
+# How often to poll for new commits (seconds)
+poll_interval: 60
