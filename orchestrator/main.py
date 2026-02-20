@@ -136,7 +136,7 @@ def run_one(
 
     run_output = output or "(no output)"
     check_summary = ("Success. Ran: `%s`" if exit_code == 0 else "Failed. Ran: `%s`") % command
-    check_text = "**Command:** `%s`\n\n**Output:**\n\n```\n%s\n```" % (command, run_output)
+    check_text = "**Command:** `%s`\n\n%s" % (command, run_output)
     complete_check_run(
         owner=owner,
         repo=repo,
