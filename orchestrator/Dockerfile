@@ -1,4 +1,5 @@
 # Combined orchestrator + runner: poll, clone, run job in same container (no inner Docker).
+# If building on ARM (e.g. Mac M1) for x86 homelab, use: docker build --platform linux/amd64 ...
 FROM python:3.12-alpine
 
 RUN apk add --no-cache \

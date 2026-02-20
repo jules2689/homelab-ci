@@ -214,9 +214,11 @@ INDEX_HTML = """<!DOCTYPE html>
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      overflow: hidden;
+      overflow-x: auto;
+      overflow-y: visible;
+      -webkit-overflow-scrolling: touch;
     }
-    table { width: 100%; border-collapse: collapse; }
+    table { width: 100%; min-width: 640px; border-collapse: collapse; }
     th {
       font-family: 'JetBrains Mono', monospace;
       font-size: 0.6875rem;
@@ -397,6 +399,15 @@ INDEX_HTML = """<!DOCTYPE html>
     .pagination button:disabled {
       opacity: 0.5;
       cursor: not-allowed;
+    }
+    @media (max-width: 640px) {
+      body { padding: 1rem 0.75rem; }
+      .wrap { margin: 0; }
+      .table-wrap { border-radius: var(--radius-sm); margin: 0 -0.25rem; }
+      table { min-width: 560px; }
+      th, td { padding: 0.5rem 0.75rem; font-size: 0.8125rem; }
+      .msg { max-width: 140px; }
+      .pagination { flex-wrap: wrap; gap: 0.5rem; }
     }
     .loading-row td {
       text-align: center;

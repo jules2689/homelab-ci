@@ -17,7 +17,6 @@ from github_api import get_latest_commit, get_file, list_branches, get_commit, g
 from github_checks import create_check_run, complete_check_run
 from github_app import is_github_app_configured, get_installation_token_for_repo
 from job_runner import get_repo_config, run_job
-from log_format import collapsible_stanza_to_details
 from runs_db import (
     init_db,
     record_run as db_record_run,
@@ -137,9 +136,7 @@ def run_one(
 
     run_output = output or "(no output)"
     check_summary = ("Success. Ran: `%s`" if exit_code == 0 else "Failed. Ran: `%s`") % command
-    formatted_output = collapsible_stanza_to_details(run_output)
-    output_block = formatted_output if "<details>" in formatted_output else "```\n%s\n```" % run_output
-    check_text = "**Command:** `%s`\n\n**Output:**\n\n%s" % (command, output_block)
+    check_text = "**Command:** `%s`\n\n**Output:**\n\n```\n%s\n```" % (command, run_output)
     complete_check_run(
         owner=owner,
         repo=repo,

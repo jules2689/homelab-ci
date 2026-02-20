@@ -82,8 +82,9 @@ def update_check_run(
         if output_summary is not None:
             body["output"]["summary"] = output_summary
         if output_text is not None:
-            # GitHub has a 65535 character limit for output.text; send as markdown so <details>/GFM render
-            body["output"]["text"] = output_text[-65535:] if len(output_text) > 65535 else output_text
+            # GitHub has a 65535 character limit for output.text; wrap in code block (reserve 8 chars for ```\n and \n```)
+            raw = output_text[-65527:] if len(output_text) > 65527 else output_text
+            body["output"]["text"] = "```\n" + raw + "\n```"
     return _req("PATCH", f"/repos/{owner}/{repo}/check-runs/{check_run_id}", body, token=token)
 
 
