@@ -70,8 +70,8 @@ def update_check_run(
         "name": "ci-lite",
         "head_sha": head_sha,
         "status": status,
-        "started_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    # Never send started_at on update — it is set once in create_check_run and must not be overridden
     if conclusion and status == "completed":
         body["conclusion"] = conclusion
         body["completed_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")

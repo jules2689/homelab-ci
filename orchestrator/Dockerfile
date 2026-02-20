@@ -17,7 +17,8 @@ RUN gem install bundler --no-document 2>/dev/null || true
 WORKDIR /app
 COPY requirements.txt .
 ENV PIP_ROOT_USER_ACTION=ignore
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN chmod +x /app/run-in-repo.sh /app/entrypoint.sh
 

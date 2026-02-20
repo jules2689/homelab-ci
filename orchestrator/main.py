@@ -13,11 +13,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from github_api import get_latest_commit, get_file, list_branches
+from github_api import get_latest_commit, get_file, list_branches, get_commit
 from github_checks import create_check_run, complete_check_run
 from github_app import is_github_app_configured, get_installation_token_for_repo
 from job_runner import get_repo_config, run_job
-from runs_db import init_db, record_run as db_record_run, archive_runs_older_than
+from runs_db import (
+    init_db,
+    record_run as db_record_run,
+    record_pending_run as db_record_pending_run,
+    get_pending_runs,
+    archive_runs_older_than,
+)
 
 
 CONFIG_PATH = os.environ.get("CI_LITE_CONFIG", "config.yaml")
@@ -58,6 +64,15 @@ def build_clone_url(owner: str, repo: str, *, token: str) -> str:
     return f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
 
 
+def _commit_message_first_line(commit: dict, *, owner: str, repo: str, token: str) -> str:
+    """First line of commit message; fetches full commit if only sha is present."""
+    msg = (commit.get("commit") or {}).get("message") or ""
+    if not msg and commit.get("sha"):
+        full = get_commit(owner, repo, commit["sha"], token=token)
+        msg = (full.get("commit") or {}).get("message") or ""
+    return (msg.strip().split("\n")[0] or "").strip()
+
+
 def run_one(
     repo_config: dict,
     commit: dict,
@@ -70,6 +85,8 @@ def run_one(
     repo = repo_config["repo"]
     branch = repo_config.get("branch", "main")
     sha = commit["sha"]
+    commit_message = _commit_message_first_line(commit, owner=owner, repo=repo, token=token)
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     def get_file_fn(o, r, ref, path):
         return get_file(o, r, ref, path, token=token)
@@ -87,6 +104,15 @@ def run_one(
     check = create_check_run(owner, repo, sha, name="ci-lite", token=token)
     check_run_id = check["id"]
     html_url = check.get("html_url", "")
+    db_record_pending_run(
+        owner=owner,
+        repo=repo,
+        sha=sha,
+        html_url=html_url,
+        at=started_at,
+        branch=branch,
+        commit_message=commit_message,
+    )
 
     clone_url = build_clone_url(owner, repo, token=token)
     # Repo copy under WORKSPACE_ROOT (e.g. /data/workspace when in Docker); job runs in that copy at exact commit
@@ -129,6 +155,8 @@ def run_one(
         html_url=html_url,
         at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         output=run_output,
+        branch=branch,
+        commit_message=commit_message,
     )
     return html_url
 
@@ -168,6 +196,13 @@ def main():
             state[key] = {}
 
     logger.info("State: %s", state)
+
+    # Pending runs (container killed mid-job) will be re-run on first matching poll
+    pending_retry = set()
+    for r in get_pending_runs():
+        pending_retry.add((r["owner"], r["repo"], r["branch"], r["sha"]))
+    if pending_retry:
+        logger.info("Found %d pending run(s) to retry on next poll", len(pending_retry))
 
     ARCHIVE_DAYS = 7
 
@@ -209,14 +244,19 @@ def main():
                 logger.info("Checking branch: %s %s", key, branch)
                 sha = commit["sha"]
                 last = state[key].get(branch)
-                if last == sha:
+                is_pending_retry = (owner, repo, branch, sha[:7]) in pending_retry
+                if last == sha and not is_pending_retry:
                     continue
                 # First poll: record SHA only (new commits only). Don't run for current HEAD on first run.
-                if last is None:
+                # Exception: re-run pending jobs (container was killed mid-job).
+                if last is None and not is_pending_retry:
                     if not dry_run:
                         state[key][branch] = sha
                         save_state(state)
                     continue
+                if is_pending_retry:
+                    pending_retry.discard((owner, repo, branch, sha[:7]))
+                    logger.info("Retrying pending job %s %s @ %s", key, branch, sha[:7])
                 if not dry_run:
                     state[key][branch] = sha
                     save_state(state)

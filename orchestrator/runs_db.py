@@ -4,8 +4,8 @@ import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-# Cap stored log size (match GitHub Checks API limit)
-MAX_OUTPUT_LEN = 65535
+# Cap stored log size in DB (full logs for web UI; GitHub Checks API gets truncated separately)
+MAX_OUTPUT_LEN = 1_000_000  # 1 MB per run
 
 
 def _db_path() -> Path:
@@ -36,6 +36,35 @@ def init_db(path: Path | None = None) -> None:
         info = conn.execute("PRAGMA table_info(runs)").fetchall()
         if not any(c[1] == "output" for c in info):
             conn.execute("ALTER TABLE runs ADD COLUMN output TEXT NOT NULL DEFAULT ''")
+        if not any(c[1] == "branch" for c in info):
+            conn.execute("ALTER TABLE runs ADD COLUMN branch TEXT NOT NULL DEFAULT 'main'")
+        if not any(c[1] == "commit_message" for c in info):
+            conn.execute("ALTER TABLE runs ADD COLUMN commit_message TEXT NOT NULL DEFAULT ''")
+        if not any(c[1] == "started_at" for c in info):
+            conn.execute("ALTER TABLE runs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
+
+
+# success: 1=pass, 0=fail, -1=pending
+PENDING = -1
+
+
+def record_pending_run(
+    owner: str,
+    repo: str,
+    sha: str,
+    html_url: str,
+    at: str,
+    branch: str = "main",
+    commit_message: str = "",
+) -> None:
+    """Insert a run in pending state (job started, not yet completed)."""
+    path = _db_path()
+    init_db(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO runs (owner, repo, sha, success, html_url, at, output, branch, commit_message, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (owner, repo, sha[:7], PENDING, html_url or "", at, "", branch or "main", (commit_message or "")[:2048], at),
+        )
 
 
 def record_run(
@@ -46,19 +75,35 @@ def record_run(
     html_url: str,
     at: str,
     output: str = "",
+    branch: str = "main",
+    commit_message: str = "",
 ) -> None:
+    """Record completed run: update existing pending run for this owner/repo/sha, or insert."""
     path = _db_path()
     init_db(path)
     out = (output or "")[:MAX_OUTPUT_LEN]
+    msg = (commit_message or "")[:2048]
     with sqlite3.connect(path) as conn:
-        conn.execute(
-            "INSERT INTO runs (owner, repo, sha, success, html_url, at, output) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (owner, repo, sha[:7], 1 if success else 0, html_url or "", at, out),
+        cur = conn.execute(
+            "SELECT id FROM runs WHERE owner=? AND repo=? AND sha=? AND success=? ORDER BY id DESC LIMIT 1",
+            (owner, repo, sha[:7], PENDING),
         )
+        row = cur.fetchone()
+        if row:
+            # at = completed_at; started_at stays as set when pending was inserted
+            conn.execute(
+                "UPDATE runs SET success=?, html_url=?, at=?, output=?, branch=?, commit_message=? WHERE id=?",
+                (1 if success else 0, html_url or "", at, out, branch or "main", msg, row[0]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO runs (owner, repo, sha, success, html_url, at, output, branch, commit_message, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (owner, repo, sha[:7], 1 if success else 0, html_url or "", at, out, branch or "main", msg, at),
+            )
 
 
 def get_runs(limit: int = 200) -> list[dict]:
-    """Return recent runs (newest first) as list of dicts with owner, repo, sha, success, html_url, at, output."""
+    """Return recent runs (newest first) with owner, repo, sha, success, html_url, at, output, commit_message, started_at."""
     path = _db_path()
     if not path.exists():
         return []
@@ -66,25 +111,54 @@ def get_runs(limit: int = 200) -> list[dict]:
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
+                "SELECT owner, repo, sha, success, html_url, at, output, commit_message, started_at FROM runs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = conn.execute(
                 "SELECT owner, repo, sha, success, html_url, at, output FROM runs ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-            has_output = True
-        except sqlite3.OperationalError:
-            rows = conn.execute(
-                "SELECT owner, repo, sha, success, html_url, at FROM runs ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-            has_output = False
     return [
         {
             "owner": r["owner"],
             "repo": r["repo"],
             "sha": r["sha"],
-            "success": bool(r["success"]),
+            "success": None if r["success"] == PENDING else bool(r["success"]),
             "html_url": r["html_url"] or "",
             "at": r["at"],
-            "output": (r["output"] if has_output and "output" in r.keys() else "") or "",
+            "output": (r["output"] if "output" in r.keys() else "") or "",
+            "commit_message": r["commit_message"] if "commit_message" in r.keys() else "",
+            "started_at": r["started_at"] if "started_at" in r.keys() else r["at"],
+        }
+        for r in rows
+    ]
+
+
+def get_pending_runs() -> list[dict]:
+    """Return runs that are still pending (job was started but never completed, e.g. container killed)."""
+    path = _db_path()
+    if not path.exists():
+        return []
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT owner, repo, sha, branch FROM runs WHERE success=? ORDER BY id DESC",
+                (PENDING,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # branch column may not exist yet
+            rows = conn.execute(
+                "SELECT owner, repo, sha FROM runs WHERE success=? ORDER BY id DESC",
+                (PENDING,),
+            ).fetchall()
+    return [
+        {
+            "owner": r["owner"],
+            "repo": r["repo"],
+            "sha": r["sha"],
+            "branch": r["branch"] if "branch" in r.keys() else "main",
         }
         for r in rows
     ]

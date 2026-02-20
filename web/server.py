@@ -5,6 +5,9 @@ import logging
 import os
 import sqlite3
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -13,6 +16,17 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DATA_DIR = Path(os.path.expanduser(os.environ.get("CI_LITE_DATA_DIR", "~/.ci-lite")))
 RUNS_DB_PATH = Path(os.environ.get("CI_LITE_DB") or str(_DEFAULT_DATA_DIR / "runs.db"))
 PORT = int(os.environ.get("CI_LITE_WEB_PORT", "8080"))
+
+try:
+    from github_app import is_github_app_configured, get_installation_token_for_repo
+    from github_api import get_commit as _github_get_commit
+except ImportError:
+    def is_github_app_configured():
+        return False
+    def get_installation_token_for_repo(owner, repo):
+        return ""
+    def _github_get_commit(owner, repo, ref, *, token):
+        return None
 
 
 def load_runs():
@@ -24,29 +38,100 @@ def load_runs():
             conn.row_factory = sqlite3.Row
             try:
                 rows = conn.execute(
-                    "SELECT owner, repo, sha, success, html_url, at, output FROM runs ORDER BY id DESC LIMIT 200"
+                    "SELECT owner, repo, sha, success, html_url, at, output, commit_message, started_at FROM runs ORDER BY id DESC LIMIT 200"
                 ).fetchall()
-                has_output = True
             except sqlite3.OperationalError:
                 rows = conn.execute(
-                    "SELECT owner, repo, sha, success, html_url, at FROM runs ORDER BY id DESC LIMIT 200"
+                    "SELECT owner, repo, sha, success, html_url, at, output FROM runs ORDER BY id DESC LIMIT 200"
                 ).fetchall()
-                has_output = False
         return [
             {
                 "owner": r["owner"],
                 "repo": r["repo"],
                 "sha": r["sha"],
-                "success": bool(r["success"]),
+                "success": None if r["success"] == -1 else bool(r["success"]),
                 "html_url": r["html_url"] or "",
                 "at": r["at"],
-                "output": (r["output"] if has_output and "output" in r.keys() else "") or "",
+                "output": (r["output"] if "output" in r.keys() else "") or "",
+                "commit_message": r["commit_message"] if "commit_message" in r.keys() else "",
+                "started_at": r["started_at"] if "started_at" in r.keys() else r["at"],
             }
             for r in rows
         ]
     except Exception as e:
         logger.exception("failed to load runs from %s: %s", RUNS_DB_PATH, e)
         return []
+
+
+def _sha7(sha: str) -> str:
+    """Normalize to 7-char SHA as stored in DB."""
+    return (sha or "").strip()[:7]
+
+
+def get_stored_commit_message(owner: str, repo: str, sha: str) -> str | None:
+    """Return stored commit_message for this run if any. Prefer DB so we skip the API when possible."""
+    if not RUNS_DB_PATH.exists() or not owner or not repo or not sha:
+        return None
+    try:
+        with sqlite3.connect(RUNS_DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT commit_message FROM runs WHERE owner=? AND repo=? AND sha=? AND (commit_message IS NOT NULL AND commit_message != '') ORDER BY id DESC LIMIT 1",
+                (owner, repo, _sha7(sha)),
+            ).fetchone()
+            if row and row[0]:
+                return row[0].strip() or None
+    except sqlite3.OperationalError:
+        pass
+    except Exception as e:
+        logger.debug("get_stored_commit_message: %s", e)
+    return None
+
+
+def update_commit_message(owner: str, repo: str, sha: str, message: str) -> None:
+    """Persist commit message for runs matching owner/repo/sha so we never have to call the API again."""
+    if not message or not owner or not repo or not sha:
+        return
+    try:
+        with sqlite3.connect(RUNS_DB_PATH) as conn:
+            conn.execute(
+                "UPDATE runs SET commit_message=? WHERE owner=? AND repo=? AND sha=?",
+                (message[:2048].strip(), owner, repo, _sha7(sha)),
+            )
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    except Exception as e:
+        logger.warning("update_commit_message failed: %s", e)
+
+
+def fetch_commit_message(owner: str, repo: str, sha: str, *, debug: bool = False) -> tuple[str | None, str | None]:
+    """Fetch first line of commit message from GitHub via GitHub App.
+    Returns (message_or_none, debug_reason_if_requested).
+    """
+    if not owner or not repo or not sha:
+        return (None, "missing owner/repo/sha" if debug else None)
+    if not is_github_app_configured():
+        logger.info("commit message lazy-load: GitHub App not configured (set GITHUB_APP_ID and key for web)")
+        return (None, "GitHub App not configured (set GITHUB_APP_ID and GITHUB_APP_KEY_PATH or GITHUB_APP_PRIVATE_KEY for web)" if debug else None)
+    try:
+        token = get_installation_token_for_repo(owner, repo)
+        if not token:
+            logger.warning("commit message lazy-load: no installation token for %s/%s", owner, repo)
+            return (None, "no installation token (app not installed on this repo?)" if debug else None)
+        data = _github_get_commit(owner, repo, sha, token=token)
+        if not data:
+            logger.warning("commit message lazy-load: get_commit returned None for %s/%s %s", owner, repo, sha[:7])
+            return (None, "GitHub API get_commit returned None (404 or error)" if debug else None)
+        commit_obj = data.get("commit")
+        if not commit_obj:
+            logger.warning("commit message lazy-load: no 'commit' in response for %s/%s %s", owner, repo, sha[:7])
+            return (None, "no 'commit' in API response" if debug else None)
+        msg = commit_obj.get("message") or ""
+        first_line = (msg.strip().split("\n")[0] or "").strip()
+        return (first_line or None, None)
+    except Exception as e:
+        logger.warning("commit message lazy-load %s/%s %s: %s", owner, repo, sha[:7], e)
+        return (None, str(e) if debug else None)
 
 
 INDEX_HTML = """<!DOCTYPE html>
@@ -155,7 +240,10 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     .badge.pass { background: rgba(63, 185, 80, 0.18); color: var(--pass); }
     .badge.fail { background: rgba(248, 81, 73, 0.18); color: var(--fail); }
+    .badge.pending { background: rgba(125, 133, 144, 0.25); color: var(--muted); }
     .time { color: var(--muted); font-size: 0.8125rem; }
+    .msg { color: var(--muted); font-size: 0.8125rem; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .msg-loading { color: var(--muted); }
     a.link {
       color: var(--accent);
       text-decoration: none;
@@ -260,7 +348,7 @@ INDEX_HTML = """<!DOCTYPE html>
     <p class="sub">Recent runs. Click "View log" to open job output.</p>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Repo</th><th>SHA</th><th>Result</th><th>Time</th><th>GitHub</th><th>Log</th></tr></thead>
+        <thead><tr><th>Repo</th><th>SHA</th><th>Message</th><th>Result</th><th>Time</th><th>GitHub</th><th>Log</th></tr></thead>
         <tbody id="runs"></tbody>
       </table>
     </div>
@@ -301,6 +389,46 @@ INDEX_HTML = """<!DOCTYPE html>
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape' && backdrop.classList.contains('is-open')) closeLog();
     });
+    function parseISO(s) {
+      if (!s) return NaN;
+      var n = Date.parse(s);
+      return isNaN(n) ? NaN : n;
+    }
+    function formatDuration(ms) {
+      if (ms < 0 || !isFinite(ms)) return '—';
+      var s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's';
+      var m = Math.floor(s / 60);
+      s = s % 60;
+      if (m < 60) return s ? m + 'm ' + s + 's' : m + 'm';
+      var h = Math.floor(m / 60);
+      m = m % 60;
+      return (h + 'h ' + (m ? m + 'm' : '')).trim();
+    }
+    function timeAgo(ms) {
+      if (!isFinite(ms)) return '—';
+      var sec = Math.round((Date.now() - ms) / 1000);
+      if (sec < 60) return 'just now';
+      var min = Math.floor(sec / 60);
+      if (min < 60) return min + ' min ago';
+      var h = Math.floor(min / 60);
+      if (h < 24) return h + ' hr ago';
+      var d = Math.floor(h / 24);
+      return d + ' day' + (d !== 1 ? 's' : '') + ' ago';
+    }
+    function timeCell(r) {
+      var started = parseISO(r.started_at);
+      var at = parseISO(r.at);
+      var pending = r.success === null || r.success === undefined;
+      if (pending) {
+        if (!isFinite(started)) return '—';
+        return 'Running for ' + formatDuration(Date.now() - started);
+      }
+      if (!isFinite(at)) return esc(r.at || '—');
+      var ago = timeAgo(at);
+      if (!isFinite(started) || started >= at) return ago;
+      return 'ran for ' + formatDuration(at - started) + ' ' + ago;
+    }
     fetch('/api/runs').then(r => r.json()).then(runs => {
       var t = document.getElementById('runs');
       runs.forEach(function(r) {
@@ -319,14 +447,35 @@ INDEX_HTML = """<!DOCTYPE html>
         } else {
           logCell.innerHTML = '<span class="empty">—</span>';
         }
+        var resultBadge = (r.success === null || r.success === undefined)
+          ? '<span class="badge pending">pending</span>'
+          : '<span class="badge ' + (r.success ? 'pass' : 'fail') + '">' + (r.success ? 'pass' : 'fail') + '</span>';
+        var msg = (r.commit_message || '').trim();
+        var msgContent = msg
+          ? esc(msg)
+          : '<span class="msg-loading" data-owner="' + esc(r.owner) + '" data-repo="' + esc(r.repo) + '" data-sha="' + esc(r.sha) + '">…</span>';
         tr.innerHTML =
           '<td class="repo">' + esc(r.owner) + '/' + esc(r.repo) + '</td>' +
           '<td class="sha"><code>' + esc(r.sha) + '</code></td>' +
-          '<td><span class="badge ' + (r.success ? 'pass' : 'fail') + '">' + (r.success ? 'pass' : 'fail') + '</span></td>' +
-          '<td class="time">' + esc(r.at) + '</td>' +
+          '<td class="msg" title="' + esc(msg || '') + '">' + msgContent + '</td>' +
+          '<td>' + resultBadge + '</td>' +
+          '<td class="time">' + timeCell(r) + '</td>' +
           '<td><a class="link" href="' + esc(r.html_url || '#') + '" target="_blank" rel="noopener">GitHub</a></td>';
         tr.appendChild(logCell);
         t.appendChild(tr);
+      });
+      document.querySelectorAll('.msg-loading').forEach(function(el) {
+        var owner = el.dataset.owner, repo = el.dataset.repo, sha = el.dataset.sha;
+        if (!owner || !repo || !sha) return;
+        fetch('/api/commit?owner=' + encodeURIComponent(owner) + '&repo=' + encodeURIComponent(repo) + '&sha=' + encodeURIComponent(sha))
+          .then(function(res) { return res.json(); })
+          .then(function(o) {
+            var m = (o.commit_message || '').trim();
+            var td = el.closest('td');
+            if (m) { td.innerHTML = esc(m); td.title = m; }
+            else { td.innerHTML = '<span class="empty">—</span>'; }
+          })
+          .catch(function() {});
       });
     });
   </script>
@@ -348,6 +497,32 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(load_runs()).encode())
+            return
+        if self.path.startswith("/api/commit"):
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            owner = (qs.get("owner") or [""])[0].strip()
+            repo = (qs.get("repo") or [""])[0].strip()
+            sha = (qs.get("sha") or [""])[0].strip()
+            debug = (qs.get("debug") or ["0"])[0].strip() in ("1", "true", "yes")
+            if owner and repo and sha:
+                msg = get_stored_commit_message(owner, repo, sha)
+                debug_reason = None
+                if not msg:
+                    msg, debug_reason = fetch_commit_message(owner, repo, sha, debug=debug)
+                    if msg:
+                        update_commit_message(owner, repo, sha, msg)
+                out = {"commit_message": msg or ""}
+                if debug and debug_reason:
+                    out["debug"] = debug_reason
+            else:
+                out = {"commit_message": ""}
+                if debug:
+                    out["debug"] = "missing owner, repo, or sha"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(out).encode())
             return
         self.send_response(404)
         self.end_headers()
