@@ -30,6 +30,48 @@ def get_commit(owner: str, repo: str, ref: str, *, token: str) -> dict | None:
         return None
 
 
+def get_commits_between(owner: str, repo: str, base_sha: str, head_sha: str, *, token: str) -> list[dict]:
+    """List commits reachable from head_sha but not from base_sha (chronological order).
+    Uses Compare API; paginates to get all. Returns [] on error or if base is not behind head.
+    """
+    if not base_sha or not head_sha or base_sha == head_sha:
+        return []
+    basehead = f"{urllib.parse.quote(base_sha, safe='')}...{urllib.parse.quote(head_sha, safe='')}"
+    path = f"/repos/{owner}/{repo}/compare/{basehead}"
+    url = f"{API_BASE}{path}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": API_VERSION,
+    }
+    out: list[dict] = []
+    page = 1
+    per_page = 100
+    while True:
+        req_url = f"{url}?per_page={per_page}&page={page}"
+        req = urllib.request.Request(req_url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logger.warning("Compare failed for %s/%s %s..%s: 404", owner, repo, base_sha[:7], head_sha[:7])
+            else:
+                logger.warning("Compare failed for %s/%s: %s", owner, repo, e.code)
+            return out
+        commits = data.get("commits") if isinstance(data, dict) else []
+        if not isinstance(commits, list):
+            break
+        out.extend(commits)
+        if len(commits) < per_page:
+            break
+        page += 1
+        if page > 25:
+            logger.warning("Compare returned many pages for %s/%s, capping at 2500 commits", owner, repo)
+            break
+    return out
+
+
 def get_latest_commit(owner: str, repo: str, branch: str, *, token: str) -> dict | None:
     """Get the latest commit SHA and info for the given branch. Returns None on error."""
     path = f"/repos/{owner}/{repo}/commits?sha={urllib.parse.quote(branch)}&per_page=1"

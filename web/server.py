@@ -29,22 +29,29 @@ except ImportError:
         return None
 
 
-def load_runs():
+def load_runs(page: int = 1, per_page: int = 10) -> dict:
+    """Load runs for the given page. Returns { runs, total, page, per_page }."""
     if not RUNS_DB_PATH.exists():
         logger.debug("runs DB not found at %s", RUNS_DB_PATH)
-        return []
+        return {"runs": [], "total": 0, "page": page, "per_page": per_page}
+    page = max(1, page)
+    per_page = max(1, min(100, per_page))
+    offset = (page - 1) * per_page
     try:
         with sqlite3.connect(RUNS_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
+            total = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
             try:
                 rows = conn.execute(
-                    "SELECT owner, repo, sha, success, html_url, at, output, commit_message, started_at FROM runs ORDER BY id DESC LIMIT 200"
+                    "SELECT owner, repo, sha, success, html_url, at, output, commit_message, started_at FROM runs ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (per_page, offset),
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = conn.execute(
-                    "SELECT owner, repo, sha, success, html_url, at, output FROM runs ORDER BY id DESC LIMIT 200"
+                    "SELECT owner, repo, sha, success, html_url, at, output FROM runs ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (per_page, offset),
                 ).fetchall()
-        return [
+        runs = [
             {
                 "owner": r["owner"],
                 "repo": r["repo"],
@@ -58,9 +65,10 @@ def load_runs():
             }
             for r in rows
         ]
+        return {"runs": runs, "total": total, "page": page, "per_page": per_page}
     except Exception as e:
         logger.exception("failed to load runs from %s: %s", RUNS_DB_PATH, e)
-        return []
+        return {"runs": [], "total": 0, "page": page, "per_page": per_page}
 
 
 def _sha7(sha: str) -> str:
@@ -340,6 +348,37 @@ INDEX_HTML = """<!DOCTYPE html>
     .modal-log::-webkit-scrollbar { width: 8px; height: 8px; }
     .modal-log::-webkit-scrollbar-track { background: transparent; }
     .modal-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 1rem;
+      padding: 0.5rem 0;
+      font-size: 0.875rem;
+      color: var(--muted);
+    }
+    .pagination .nav {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .pagination button {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8125rem;
+      color: var(--accent);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+    }
+    .pagination button:hover:not(:disabled) {
+      color: var(--accent-hover);
+      background: var(--surface-hover);
+    }
+    .pagination button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -352,6 +391,7 @@ INDEX_HTML = """<!DOCTYPE html>
         <tbody id="runs"></tbody>
       </table>
     </div>
+    <div class="pagination" id="pagination"></div>
   </div>
   <div id="log-modal" class="modal-backdrop" aria-hidden="true">
     <div class="modal-panel" role="dialog" aria-labelledby="modal-title" onclick="event.stopPropagation()">
@@ -429,42 +469,42 @@ INDEX_HTML = """<!DOCTYPE html>
       if (!isFinite(started) || started >= at) return ago;
       return 'ran for ' + formatDuration(at - started) + ' ' + ago;
     }
-    fetch('/api/runs').then(r => r.json()).then(runs => {
-      var t = document.getElementById('runs');
-      runs.forEach(function(r) {
-        var tr = document.createElement('tr');
-        var logCell = document.createElement('td');
-        if (r.output != null && r.output !== '') {
-          var btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'btn-log';
-          btn.textContent = 'View log';
-          btn.addEventListener('click', function(ev) {
-            ev.preventDefault();
-            openLog((r.owner || '') + '/' + (r.repo || '') + ' @ ' + (r.sha || ''), r.output);
-          });
-          logCell.appendChild(btn);
-        } else {
-          logCell.innerHTML = '<span class="empty">—</span>';
-        }
-        var resultBadge = (r.success === null || r.success === undefined)
-          ? '<span class="badge pending">pending</span>'
-          : '<span class="badge ' + (r.success ? 'pass' : 'fail') + '">' + (r.success ? 'pass' : 'fail') + '</span>';
-        var msg = (r.commit_message || '').trim();
-        var msgContent = msg
-          ? esc(msg)
-          : '<span class="msg-loading" data-owner="' + esc(r.owner) + '" data-repo="' + esc(r.repo) + '" data-sha="' + esc(r.sha) + '">…</span>';
-        tr.innerHTML =
-          '<td class="repo">' + esc(r.owner) + '/' + esc(r.repo) + '</td>' +
-          '<td class="sha"><code>' + esc(r.sha) + '</code></td>' +
-          '<td class="msg" title="' + esc(msg || '') + '">' + msgContent + '</td>' +
-          '<td>' + resultBadge + '</td>' +
-          '<td class="time">' + timeCell(r) + '</td>' +
-          '<td><a class="link" href="' + esc(r.html_url || '#') + '" target="_blank" rel="noopener">GitHub</a></td>';
-        tr.appendChild(logCell);
-        t.appendChild(tr);
-      });
-      document.querySelectorAll('.msg-loading').forEach(function(el) {
+    var perPage = 10;
+    function renderRun(r, t) {
+      var tr = document.createElement('tr');
+      var logCell = document.createElement('td');
+      if (r.output != null && r.output !== '') {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn-log';
+        btn.textContent = 'View log';
+        btn.addEventListener('click', function(ev) {
+          ev.preventDefault();
+          openLog((r.owner || '') + '/' + (r.repo || '') + ' @ ' + (r.sha || ''), r.output);
+        });
+        logCell.appendChild(btn);
+      } else {
+        logCell.innerHTML = '<span class="empty">—</span>';
+      }
+      var resultBadge = (r.success === null || r.success === undefined)
+        ? '<span class="badge pending">pending</span>'
+        : '<span class="badge ' + (r.success ? 'pass' : 'fail') + '">' + (r.success ? 'pass' : 'fail') + '</span>';
+      var msg = (r.commit_message || '').trim();
+      var msgContent = msg
+        ? esc(msg)
+        : '<span class="msg-loading" data-owner="' + esc(r.owner) + '" data-repo="' + esc(r.repo) + '" data-sha="' + esc(r.sha) + '">…</span>';
+      tr.innerHTML =
+        '<td class="repo">' + esc(r.owner) + '/' + esc(r.repo) + '</td>' +
+        '<td class="sha"><code>' + esc(r.sha) + '</code></td>' +
+        '<td class="msg" title="' + esc(msg || '') + '">' + msgContent + '</td>' +
+        '<td>' + resultBadge + '</td>' +
+        '<td class="time">' + timeCell(r) + '</td>' +
+        '<td><a class="link" href="' + esc(r.html_url || '#') + '" target="_blank" rel="noopener">GitHub</a></td>';
+      tr.appendChild(logCell);
+      t.appendChild(tr);
+    }
+    function lazyLoadMessages(container) {
+      container.querySelectorAll('.msg-loading').forEach(function(el) {
         var owner = el.dataset.owner, repo = el.dataset.repo, sha = el.dataset.sha;
         if (!owner || !repo || !sha) return;
         fetch('/api/commit?owner=' + encodeURIComponent(owner) + '&repo=' + encodeURIComponent(repo) + '&sha=' + encodeURIComponent(sha))
@@ -477,7 +517,45 @@ INDEX_HTML = """<!DOCTYPE html>
           })
           .catch(function() {});
       });
-    });
+    }
+    function renderPagination(data) {
+      var total = data.total || 0;
+      var page = data.page || 1;
+      var pp = data.per_page || perPage;
+      var totalPages = Math.max(1, Math.ceil(total / pp));
+      var el = document.getElementById('pagination');
+      el.innerHTML = '';
+      var info = document.createElement('span');
+      info.textContent = 'Page ' + page + ' of ' + totalPages + ' (' + total + ' runs)';
+      el.appendChild(info);
+      var nav = document.createElement('div');
+      nav.className = 'nav';
+      var prev = document.createElement('button');
+      prev.textContent = 'Previous';
+      prev.disabled = page <= 1;
+      prev.addEventListener('click', function() { if (page > 1) loadPage(page - 1); });
+      var next = document.createElement('button');
+      next.textContent = 'Next';
+      next.disabled = page >= totalPages;
+      next.addEventListener('click', function() { if (page < totalPages) loadPage(page + 1); });
+      nav.appendChild(prev);
+      nav.appendChild(next);
+      el.appendChild(nav);
+    }
+    function loadPage(page) {
+      var t = document.getElementById('runs');
+      t.innerHTML = '';
+      fetch('/api/runs?page=' + encodeURIComponent(page) + '&per_page=' + encodeURIComponent(perPage))
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+          var runs = data.runs || [];
+          runs.forEach(function(r) { renderRun(r, t); });
+          lazyLoadMessages(t);
+          renderPagination(data);
+        })
+        .catch(function() {});
+    }
+    loadPage(1);
   </script>
 </body>
 </html>
@@ -492,11 +570,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(INDEX_HTML.encode())
             return
-        if self.path == "/api/runs":
+        if self.path.startswith("/api/runs"):
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            try:
+                page = int((qs.get("page") or ["1"])[0])
+            except (ValueError, TypeError):
+                page = 1
+            try:
+                per_page = int((qs.get("per_page") or ["10"])[0])
+            except (ValueError, TypeError):
+                per_page = 10
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(load_runs()).encode())
+            self.wfile.write(json.dumps(load_runs(page=page, per_page=per_page)).encode())
             return
         if self.path.startswith("/api/commit"):
             parsed = urllib.parse.urlparse(self.path)

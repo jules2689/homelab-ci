@@ -13,7 +13,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from github_api import get_latest_commit, get_file, list_branches, get_commit
+from github_api import get_latest_commit, get_file, list_branches, get_commit, get_commits_between
 from github_checks import create_check_run, complete_check_run
 from github_app import is_github_app_configured, get_installation_token_for_repo
 from job_runner import get_repo_config, run_job
@@ -247,9 +247,14 @@ def main():
                 is_pending_retry = (owner, repo, branch, sha[:7]) in pending_retry
                 if last == sha and not is_pending_retry:
                     continue
-                # First poll: record SHA only (new commits only). Don't run for current HEAD on first run.
-                # Exception: re-run pending jobs (container was killed mid-job).
-                if last is None and not is_pending_retry:
+                # Build list of commits to run: every commit we haven't run yet (so every commit gets a check).
+                if last is None:
+                    to_run = [commit]
+                else:
+                    to_run = get_commits_between(owner, repo, last, sha, token=token)
+                    if not to_run and last != sha:
+                        to_run = [commit]
+                if not to_run:
                     if not dry_run:
                         state[key][branch] = sha
                         save_state(state)
@@ -257,15 +262,18 @@ def main():
                 if is_pending_retry:
                     pending_retry.discard((owner, repo, branch, sha[:7]))
                     logger.info("Retrying pending job %s %s @ %s", key, branch, sha[:7])
-                if not dry_run:
-                    state[key][branch] = sha
-                    save_state(state)
-
                 run_config = {**repo_config, "branch": branch}
-                logger.info("New commit %s on %s %s, starting job", sha[:7], key, branch)
-                url = run_one(run_config, commit, token=token, dry_run=dry_run)
-                if url:
-                    logger.info("Ran job for %s %s @ %s -> %s", key, branch, sha[:7], url)
+                logger.info("Running for %d commit(s) on %s %s (every commit since last poll)", len(to_run), key, branch)
+                for c in to_run:
+                    c_sha = c["sha"]
+                    if not dry_run:
+                        run_one(run_config, c, token=token, dry_run=dry_run)
+                        state[key][branch] = c_sha
+                        save_state(state)
+                    else:
+                        logger.info("Would run %s/%s branch %s @ %s", owner, repo, branch, c_sha[:7])
+                if not dry_run and to_run:
+                    logger.info("Ran %d job(s) for %s %s, last @ %s", len(to_run), key, branch, to_run[-1]["sha"][:7])
 
         if dry_run:
             logger.info("Dry-run done (one pass). Exiting.")
