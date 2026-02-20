@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DATA_DIR = Path(os.path.expanduser(os.environ.get("CI_LITE_DATA_DIR", "~/.ci-lite")))
 RUNS_DB_PATH = Path(os.environ.get("CI_LITE_DB") or str(_DEFAULT_DATA_DIR / "runs.db"))
 PORT = int(os.environ.get("CI_LITE_WEB_PORT", "8080"))
-VERSION = os.environ.get("CI_LITE_VERSION", "0.1.10")
+VERSION = os.environ.get("CI_LITE_VERSION", "")
 
 try:
     from github_app import is_github_app_configured, get_installation_token_for_repo
