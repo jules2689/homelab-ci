@@ -22,6 +22,7 @@ from runs_db import (
     record_run as db_record_run,
     record_pending_run as db_record_pending_run,
     get_pending_runs,
+    mark_pending_run_cancelled,
     archive_runs_older_than,
 )
 
@@ -200,9 +201,10 @@ def main():
     # Pending runs (container killed mid-job) will be re-run on first matching poll
     pending_retry = set()
     for r in get_pending_runs():
+        mark_pending_run_cancelled(r["owner"], r["repo"], r["sha"])
         pending_retry.add((r["owner"], r["repo"], r["branch"], r["sha"]))
     if pending_retry:
-        logger.info("Found %d pending run(s) to retry on next poll", len(pending_retry))
+        logger.info("Found %d pending run(s) to retry on next poll (marked previous as cancelled)", len(pending_retry))
 
     ARCHIVE_DAYS = 7
 

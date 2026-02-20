@@ -44,8 +44,9 @@ def init_db(path: Path | None = None) -> None:
             conn.execute("ALTER TABLE runs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
 
 
-# success: 1=pass, 0=fail, -1=pending
+# success: 1=pass, 0=fail, -1=pending, -2=cancelled (e.g. container restarted before job finished)
 PENDING = -1
+CANCELLED = -2
 
 
 def record_pending_run(
@@ -124,7 +125,7 @@ def get_runs(limit: int = 200) -> list[dict]:
             "owner": r["owner"],
             "repo": r["repo"],
             "sha": r["sha"],
-            "success": None if r["success"] == PENDING else bool(r["success"]),
+            "success": None if r["success"] == PENDING else ("cancelled" if r["success"] == CANCELLED else bool(r["success"])),
             "html_url": r["html_url"] or "",
             "at": r["at"],
             "output": (r["output"] if "output" in r.keys() else "") or "",
@@ -133,6 +134,18 @@ def get_runs(limit: int = 200) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def mark_pending_run_cancelled(owner: str, repo: str, sha: str) -> None:
+    """Mark the most recent pending run for this owner/repo/sha as cancelled (e.g. before restarting the job)."""
+    path = _db_path()
+    if not path.exists():
+        return
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE runs SET success=? WHERE owner=? AND repo=? AND sha=? AND success=?",
+            (CANCELLED, owner, repo, sha[:7], PENDING),
+        )
 
 
 def get_pending_runs() -> list[dict]:

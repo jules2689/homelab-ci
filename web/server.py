@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DATA_DIR = Path(os.path.expanduser(os.environ.get("CI_LITE_DATA_DIR", "~/.ci-lite")))
 RUNS_DB_PATH = Path(os.environ.get("CI_LITE_DB") or str(_DEFAULT_DATA_DIR / "runs.db"))
 PORT = int(os.environ.get("CI_LITE_WEB_PORT", "8080"))
+VERSION = os.environ.get("CI_LITE_VERSION", "0.1.10")
 
 try:
     from github_app import is_github_app_configured, get_installation_token_for_repo
@@ -29,8 +30,8 @@ except ImportError:
         return None
 
 
-def load_runs(page: int = 1, per_page: int = 10) -> dict:
-    """Load runs for the given page. Returns { runs, total, page, per_page }."""
+def load_runs(page: int = 1, per_page: int = 10, skip_count: bool = False) -> dict:
+    """Load runs for the given page. Returns { runs, total, page, per_page }. If skip_count=True, total is None (faster)."""
     if not RUNS_DB_PATH.exists():
         logger.debug("runs DB not found at %s", RUNS_DB_PATH)
         return {"runs": [], "total": 0, "page": page, "per_page": per_page}
@@ -40,7 +41,7 @@ def load_runs(page: int = 1, per_page: int = 10) -> dict:
     try:
         with sqlite3.connect(RUNS_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
-            total = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            total = None if skip_count else conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
             try:
                 rows = conn.execute(
                     "SELECT owner, repo, sha, success, html_url, at, output, commit_message, started_at FROM runs ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -56,7 +57,7 @@ def load_runs(page: int = 1, per_page: int = 10) -> dict:
                 "owner": r["owner"],
                 "repo": r["repo"],
                 "sha": r["sha"],
-                "success": None if r["success"] == -1 else bool(r["success"]),
+                "success": None if r["success"] == -1 else ("cancelled" if r["success"] == -2 else bool(r["success"])),
                 "html_url": r["html_url"] or "",
                 "at": r["at"],
                 "output": (r["output"] if "output" in r.keys() else "") or "",
@@ -69,6 +70,17 @@ def load_runs(page: int = 1, per_page: int = 10) -> dict:
     except Exception as e:
         logger.exception("failed to load runs from %s: %s", RUNS_DB_PATH, e)
         return {"runs": [], "total": 0, "page": page, "per_page": per_page}
+
+
+def get_runs_total() -> int:
+    """Return total number of runs (for pagination). Fast to call after runs are already shown."""
+    if not RUNS_DB_PATH.exists():
+        return 0
+    try:
+        with sqlite3.connect(RUNS_DB_PATH) as conn:
+            return conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    except Exception:
+        return 0
 
 
 def _sha7(sha: str) -> str:
@@ -147,7 +159,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CI-Lite</title>
+  <title>CI-Lite __VERSION__</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@400;600&display=swap" rel="stylesheet">
@@ -186,6 +198,12 @@ INDEX_HTML = """<!DOCTYPE html>
       letter-spacing: -0.02em;
       margin: 0 0 0.25rem 0;
       color: var(--text);
+    }
+    h1 .version {
+      font-size: 0.65em;
+      font-weight: 400;
+      color: var(--muted);
+      letter-spacing: 0;
     }
     .sub {
       font-size: 0.9375rem;
@@ -249,6 +267,7 @@ INDEX_HTML = """<!DOCTYPE html>
     .badge.pass { background: rgba(63, 185, 80, 0.18); color: var(--pass); }
     .badge.fail { background: rgba(248, 81, 73, 0.18); color: var(--fail); }
     .badge.pending { background: rgba(125, 133, 144, 0.25); color: var(--muted); }
+    .badge.cancelled { background: rgba(125, 133, 144, 0.2); color: var(--muted); }
     .time { color: var(--muted); font-size: 0.8125rem; }
     .msg { color: var(--muted); font-size: 0.8125rem; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .msg-loading { color: var(--muted); }
@@ -379,11 +398,28 @@ INDEX_HTML = """<!DOCTYPE html>
       opacity: 0.5;
       cursor: not-allowed;
     }
+    .loading-row td {
+      text-align: center;
+      padding: 2rem;
+      color: var(--muted);
+    }
+    .spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>CI-Lite</h1>
+    <h1>CI-Lite <span class="version">__VERSION__</span></h1>
     <p class="sub">Recent runs. Click "View log" to open job output.</p>
     <div class="table-wrap">
       <table>
@@ -488,7 +524,9 @@ INDEX_HTML = """<!DOCTYPE html>
       }
       var resultBadge = (r.success === null || r.success === undefined)
         ? '<span class="badge pending">pending</span>'
-        : '<span class="badge ' + (r.success ? 'pass' : 'fail') + '">' + (r.success ? 'pass' : 'fail') + '</span>';
+        : (r.success === 'cancelled'
+          ? '<span class="badge cancelled">cancelled</span>'
+          : '<span class="badge ' + (r.success ? 'pass' : 'fail') + '">' + (r.success ? 'pass' : 'fail') + '</span>');
       var msg = (r.commit_message || '').trim();
       var msgContent = msg
         ? esc(msg)
@@ -518,15 +556,23 @@ INDEX_HTML = """<!DOCTYPE html>
           .catch(function() {});
       });
     }
+    function showLoading(t) {
+      t.innerHTML = '';
+      var tr = document.createElement('tr');
+      tr.className = 'loading-row';
+      tr.innerHTML = '<td colspan="7"><div class="spinner"></div> Loading runs…</td>';
+      t.appendChild(tr);
+    }
     function renderPagination(data) {
-      var total = data.total || 0;
+      var total = data.total;
       var page = data.page || 1;
       var pp = data.per_page || perPage;
-      var totalPages = Math.max(1, Math.ceil(total / pp));
+      var totalKnown = total != null && total !== undefined;
+      var totalPages = totalKnown ? Math.max(1, Math.ceil(total / pp)) : null;
       var el = document.getElementById('pagination');
       el.innerHTML = '';
       var info = document.createElement('span');
-      info.textContent = 'Page ' + page + ' of ' + totalPages + ' (' + total + ' runs)';
+      info.textContent = totalKnown ? ('Page ' + page + ' of ' + totalPages + ' (' + total + ' runs)') : ('Page ' + page + ' …');
       el.appendChild(info);
       var nav = document.createElement('div');
       nav.className = 'nav';
@@ -536,30 +582,45 @@ INDEX_HTML = """<!DOCTYPE html>
       prev.addEventListener('click', function() { if (page > 1) loadPage(page - 1); });
       var next = document.createElement('button');
       next.textContent = 'Next';
-      next.disabled = page >= totalPages;
-      next.addEventListener('click', function() { if (page < totalPages) loadPage(page + 1); });
+      next.disabled = totalKnown ? page >= totalPages : false;
+      next.addEventListener('click', function() { if (!totalKnown || page < totalPages) loadPage(page + 1); });
       nav.appendChild(prev);
       nav.appendChild(next);
       el.appendChild(nav);
     }
     function loadPage(page) {
       var t = document.getElementById('runs');
-      t.innerHTML = '';
-      fetch('/api/runs?page=' + encodeURIComponent(page) + '&per_page=' + encodeURIComponent(perPage))
+      showLoading(t);
+      fetch('/api/runs?page=' + encodeURIComponent(page) + '&per_page=' + encodeURIComponent(perPage) + '&skip_count=1')
         .then(function(res) { return res.json(); })
         .then(function(data) {
+          t.innerHTML = '';
           var runs = data.runs || [];
           runs.forEach(function(r) { renderRun(r, t); });
           lazyLoadMessages(t);
           renderPagination(data);
+          if (data.total == null) {
+            fetch('/api/runs?count_only=1').then(function(r) { return r.json(); }).then(function(o) {
+              data.total = o.total;
+              renderPagination(data);
+            }).catch(function() {});
+          }
         })
-        .catch(function() {});
+        .catch(function() {
+          t.innerHTML = '';
+          var tr = document.createElement('tr');
+          tr.className = 'loading-row';
+          tr.innerHTML = '<td colspan="7">Failed to load runs.</td>';
+          t.appendChild(tr);
+          renderPagination({ total: 0, page: page, per_page: perPage });
+        });
     }
     loadPage(1);
   </script>
 </body>
 </html>
 """
+INDEX_HTML = INDEX_HTML.replace("__VERSION__", VERSION)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -573,6 +634,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/runs"):
             parsed = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(parsed.query)
+            count_only = (qs.get("count_only") or ["0"])[0].strip() in ("1", "true", "yes")
+            if count_only:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"total": get_runs_total()}).encode())
+                return
             try:
                 page = int((qs.get("page") or ["1"])[0])
             except (ValueError, TypeError):
@@ -581,10 +649,11 @@ class Handler(BaseHTTPRequestHandler):
                 per_page = int((qs.get("per_page") or ["10"])[0])
             except (ValueError, TypeError):
                 per_page = 10
+            skip_count = (qs.get("skip_count") or ["0"])[0].strip() in ("1", "true", "yes")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(load_runs(page=page, per_page=per_page)).encode())
+            self.wfile.write(json.dumps(load_runs(page=page, per_page=per_page, skip_count=skip_count)).encode())
             return
         if self.path.startswith("/api/commit"):
             parsed = urllib.parse.urlparse(self.path)
