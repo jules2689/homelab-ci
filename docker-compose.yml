@@ -3,7 +3,7 @@
 
 services:
   orchestrator:
-    image: registry.hl.jnadeau.ca/homelab-ci:0.0.1
+    image: registry.hl.jnadeau.ca/homelab-ci:0.1.12
     working_dir: /app
     volumes:
       - ./config.yaml:/app/config.yaml:ro
@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: registry.hl.jnadeau.ca/homelab-ci-web:0.0.1
+    image: registry.hl.jnadeau.ca/homelab-ci-web:0.1.12
     working_dir: /app
     volumes:
       - ./web:/app
