@@ -261,6 +261,8 @@ def main():
                         state[key][branch] = sha
                         save_state(state)
                     continue
+                # Process newest commit first so the latest head gets tested before older ones
+                to_run = list(reversed(to_run))
                 if is_pending_retry:
                     pending_retry.discard((owner, repo, branch, sha[:7]))
                     logger.info("Retrying pending job %s %s @ %s", key, branch, sha[:7])
@@ -275,7 +277,10 @@ def main():
                     else:
                         logger.info("Would run %s/%s branch %s @ %s", owner, repo, branch, c_sha[:7])
                 if not dry_run and to_run:
-                    logger.info("Ran %d job(s) for %s %s, last @ %s", len(to_run), key, branch, to_run[-1]["sha"][:7])
+                    # State was updated each run; ensure we're marked at head (we ran newest-first)
+                    state[key][branch] = sha
+                    save_state(state)
+                    logger.info("Ran %d job(s) for %s %s, last @ %s", len(to_run), key, branch, sha[:7])
 
         if dry_run:
             logger.info("Dry-run done (one pass). Exiting.")

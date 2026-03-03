@@ -3,7 +3,7 @@
 
 services:
   orchestrator:
-    image: registry.hl.jnadeau.ca/homelab-ci:0.1.13
+    image: registry.hl.jnadeau.ca/homelab-ci:0.1.15
     working_dir: /app
     volumes:
       - ./config.yaml:/app/config.yaml:ro
@@ -21,12 +21,13 @@ services:
     restart: unless-stopped
 
   web:
-    image: registry.hl.jnadeau.ca/homelab-ci-web:0.1.13
+    image: registry.hl.jnadeau.ca/homelab-ci-web:0.1.15
     working_dir: /app
     volumes:
       - ./web:/app
       - ./.docker/ci-lite-data:/data
     environment:
+      - CI_LITE_VERSION=0.1.15
       - CI_LITE_DB=/data/runs.db
       - CI_LITE_WEB_PORT=8080
       - GITHUB_APP_ID=${GITHUB_APP_ID}
