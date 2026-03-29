@@ -14,9 +14,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from github_api import get_latest_commit, get_file, list_branches, get_commit, get_commits_between
-from github_checks import create_check_run, complete_check_run
+from github_checks import create_check_run, complete_check_run, complete_check_run_cancelled
 from github_app import is_github_app_configured, get_installation_token_for_repo
-from job_runner import get_repo_config, run_job
+from job_runner import get_repo_config, run_job, JobCancelledError
 from runs_db import (
     init_db,
     record_run as db_record_run,
@@ -25,6 +25,8 @@ from runs_db import (
     get_pending_runs,
     mark_pending_run_cancelled,
     archive_runs_older_than,
+    is_cancel_requested,
+    clear_cancel_request,
 )
 
 
@@ -150,49 +152,89 @@ def run_one(
 
     logger.info("Starting job %s/%s @ %s (command: %s)", owner, repo, sha[:7], command)
     log_stream = _PendingLogStream(owner, repo, sha)
+
+    def should_cancel() -> bool:
+        return is_cancel_requested(owner, repo, sha)
+
+    exit_code = 1
+    output = ""
+    cancelled_run = False
     try:
-        exit_code, output = run_job(
-            clone_url=clone_url,
-            branch=branch,
-            sha=sha,
-            command=command,
-            workspace_dir=workspace_dir,
-            on_output=log_stream.push,
-        )
-    except Exception as e:
-        logger.exception("Job failed for %s/%s @ %s", owner, repo, sha[:7])
-        log_stream.push("\n=== ci-lite: exception ===\n")
-        log_stream.push(str(e) + "\n")
-        output = log_stream.text
-        exit_code = 1
+        try:
+            exit_code, output = run_job(
+                clone_url=clone_url,
+                branch=branch,
+                sha=sha,
+                command=command,
+                workspace_dir=workspace_dir,
+                on_output=log_stream.push,
+                should_cancel=should_cancel,
+            )
+        except JobCancelledError:
+            cancelled_run = True
+            logger.info("Job cancelled by user: %s/%s @ %s", owner, repo, sha[:7])
+            log_stream.push("\n=== ci-lite: stopped from web UI ===\n")
+            output = log_stream.text
+        except Exception as e:
+            logger.exception("Job failed for %s/%s @ %s", owner, repo, sha[:7])
+            log_stream.push("\n=== ci-lite: exception ===\n")
+            log_stream.push(str(e) + "\n")
+            output = log_stream.text
+            exit_code = 1
     finally:
         log_stream.flush()
+        clear_cancel_request(owner, repo, sha)
 
     run_output = output or "(no output)"
-    check_summary = ("Success. Ran: `%s`" if exit_code == 0 else "Failed. Ran: `%s`") % command
+    completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     check_text = "**Command:** `%s`\n\n%s" % (command, run_output)
-    complete_check_run(
-        owner=owner,
-        repo=repo,
-        check_run_id=check_run_id,
-        head_sha=sha,
-        success=(exit_code == 0),
-        output_title="ci-lite",
-        output_summary=check_summary,
-        output_text=check_text,
-        token=token,
-    )
-    db_record_run(
-        owner=owner,
-        repo=repo,
-        sha=sha,
-        success=(exit_code == 0),
-        html_url=html_url,
-        at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        output=run_output,
-        branch=branch,
-        commit_message=commit_message,
-    )
+    if cancelled_run:
+        complete_check_run_cancelled(
+            owner=owner,
+            repo=repo,
+            check_run_id=check_run_id,
+            head_sha=sha,
+            output_title="ci-lite",
+            output_summary="Stopped from the CI-Lite web UI.",
+            output_text=check_text,
+            token=token,
+        )
+        db_record_run(
+            owner=owner,
+            repo=repo,
+            sha=sha,
+            success=False,
+            html_url=html_url,
+            at=completed_at,
+            output=run_output,
+            branch=branch,
+            commit_message=commit_message,
+            cancelled=True,
+        )
+    else:
+        check_summary = ("Success. Ran: `%s`" if exit_code == 0 else "Failed. Ran: `%s`") % command
+        complete_check_run(
+            owner=owner,
+            repo=repo,
+            check_run_id=check_run_id,
+            head_sha=sha,
+            success=(exit_code == 0),
+            output_title="ci-lite",
+            output_summary=check_summary,
+            output_text=check_text,
+            token=token,
+        )
+        db_record_run(
+            owner=owner,
+            repo=repo,
+            sha=sha,
+            success=(exit_code == 0),
+            html_url=html_url,
+            at=completed_at,
+            output=run_output,
+            branch=branch,
+            commit_message=commit_message,
+        )
     return html_url
 
 

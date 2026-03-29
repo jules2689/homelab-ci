@@ -108,6 +108,49 @@ def get_run_output(owner: str, repo: str, sha: str) -> dict | None:
     return {"success": success, "output": (row["output"] if "output" in row.keys() else "") or ""}
 
 
+# Orchestrator reads cancel_requests from the same DB (see orchestrator/runs_db.py).
+_RUN_PENDING = -1
+
+
+def request_run_cancel(owner: str, repo: str, sha: str) -> tuple[int, dict]:
+    """
+    Enqueue a stop request for a pending run. Orchestrator polls this and SIGTERM's the job process group.
+    Returns (http_status, json_body).
+    """
+    if not owner or not repo or not sha:
+        return 400, {"ok": False, "error": "missing owner, repo, or sha"}
+    if not RUNS_DB_PATH.exists():
+        return 503, {"ok": False, "error": "database_unavailable"}
+    sha7 = _sha7(sha)
+    try:
+        with sqlite3.connect(RUNS_DB_PATH) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cancel_requests (
+                    owner TEXT NOT NULL,
+                    repo TEXT NOT NULL,
+                    sha TEXT NOT NULL,
+                    PRIMARY KEY (owner, repo, sha)
+                )
+                """
+            )
+            row = conn.execute(
+                "SELECT 1 FROM runs WHERE owner=? AND repo=? AND sha=? AND success=? ORDER BY id DESC LIMIT 1",
+                (owner, repo, sha7, _RUN_PENDING),
+            ).fetchone()
+            if not row:
+                return 404, {"ok": False, "error": "not_pending"}
+            conn.execute(
+                "INSERT OR IGNORE INTO cancel_requests (owner, repo, sha) VALUES (?, ?, ?)",
+                (owner, repo, sha7),
+            )
+            conn.commit()
+        return 200, {"ok": True}
+    except Exception as e:
+        logger.exception("request_run_cancel failed: %s", e)
+        return 500, {"ok": False, "error": "server_error"}
+
+
 def get_stored_commit_message(owner: str, repo: str, sha: str) -> str | None:
     """Return stored commit_message for this run if any. Prefer DB so we skip the API when possible."""
     if not RUNS_DB_PATH.exists() or not owner or not repo or not sha:
@@ -180,6 +223,7 @@ INDEX_HTML = """<!DOCTYPE html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CI-Lite __VERSION__</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@400;600&display=swap" rel="stylesheet">
@@ -356,6 +400,33 @@ INDEX_HTML = """<!DOCTYPE html>
       gap: 0.5rem 1rem;
       min-width: 0;
       flex: 1;
+    }
+    .modal-header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-shrink: 0;
+    }
+    .btn-stop {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--fail);
+      background: var(--surface);
+      border: 1px solid rgba(248, 81, 73, 0.45);
+      border-radius: var(--radius-sm);
+      padding: 0.35rem 0.65rem;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .btn-stop:hover:not(:disabled) {
+      background: rgba(248, 81, 73, 0.12);
+      border-color: var(--fail);
+    }
+    .btn-stop:disabled {
+      opacity: 0.65;
+      cursor: default;
     }
     .modal-title {
       font-family: 'JetBrains Mono', monospace;
@@ -573,7 +644,10 @@ INDEX_HTML = """<!DOCTYPE html>
           <h2 id="modal-title" class="modal-title"></h2>
           <span id="modal-state" class="modal-state badge" role="status" aria-live="polite" aria-atomic="true"></span>
         </div>
-        <button type="button" class="modal-close" aria-label="Close" id="modal-close">&times;</button>
+        <div class="modal-header-right">
+          <button type="button" id="modal-stop" class="btn-stop" hidden>Stop job</button>
+          <button type="button" class="modal-close" aria-label="Close" id="modal-close">&times;</button>
+        </div>
       </div>
       <div class="modal-body" id="modal-body">
         <div id="modal-log" class="modal-log" role="region" aria-label="Job log output"></div>
@@ -592,6 +666,7 @@ INDEX_HTML = """<!DOCTYPE html>
     var modalState = document.getElementById('modal-state');
     var modalLog = document.getElementById('modal-log');
     var modalBody = document.getElementById('modal-body');
+    var modalStop = document.getElementById('modal-stop');
     var logPollTimer = null;
     var liveLogStickNextPoll = false;
     var livePollLastRenderedOutput = null;
@@ -767,6 +842,12 @@ INDEX_HTML = """<!DOCTYPE html>
       scheduleScrollLogToEnd();
       if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
       if (pending && owner && repo && sha) {
+        modalStop.hidden = false;
+        modalStop.disabled = false;
+        modalStop.textContent = 'Stop job';
+        modalStop.dataset.owner = owner;
+        modalStop.dataset.repo = repo;
+        modalStop.dataset.sha = sha;
         livePollLastRenderedOutput = text == null ? '' : String(text);
         function poll() {
           fetch('/api/run/output?owner=' + encodeURIComponent(owner) + '&repo=' + encodeURIComponent(repo) + '&sha=' + encodeURIComponent(sha))
@@ -793,17 +874,50 @@ INDEX_HTML = """<!DOCTYPE html>
         poll();
         logPollTimer = setInterval(poll, 5000);
       } else {
+        modalStop.hidden = true;
         livePollLastRenderedOutput = null;
       }
     }
     function closeLog() {
       if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
       livePollLastRenderedOutput = null;
+      modalStop.hidden = true;
+      modalStop.disabled = false;
+      modalStop.textContent = 'Stop job';
+      delete modalStop.dataset.owner;
+      delete modalStop.dataset.repo;
+      delete modalStop.dataset.sha;
       backdrop.classList.remove('is-open');
       backdrop.setAttribute('aria-hidden', 'true');
     }
     backdrop.addEventListener('click', closeLog);
     document.getElementById('modal-close').addEventListener('click', closeLog);
+    modalStop.addEventListener('click', function(ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var o = modalStop.dataset.owner, r = modalStop.dataset.repo, s = modalStop.dataset.sha;
+      if (!o || !r || !s) return;
+      modalStop.disabled = true;
+      fetch('/api/run/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ owner: o, repo: r, sha: s })
+      })
+        .then(function(res) { return res.json().then(function(j) { return { res: res, j: j }; }); })
+        .then(function(x) {
+          if (!x.res.ok) {
+            modalStop.disabled = false;
+            if (x.j && x.j.error === 'not_pending') modalStop.textContent = 'Already finished';
+            else modalStop.textContent = 'Stop failed';
+            return;
+          }
+          modalStop.textContent = 'Stopping…';
+        })
+        .catch(function() {
+          modalStop.disabled = false;
+          modalStop.textContent = 'Stop failed';
+        });
+    });
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape' && backdrop.classList.contains('is-open')) closeLog();
     });
@@ -965,9 +1079,26 @@ INDEX_HTML = """<!DOCTYPE html>
 """
 INDEX_HTML = INDEX_HTML.replace("__VERSION__", VERSION)
 
+_WEB_DIR = Path(__file__).resolve().parent
+_FAVICON_SVG_PATH = _WEB_DIR / "favicon.svg"
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        parsed_path = urllib.parse.urlparse(self.path).path
+        if parsed_path == "/favicon.svg":
+            if not _FAVICON_SVG_PATH.is_file():
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = _FAVICON_SVG_PATH.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/" or self.path == "/index.html":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1044,6 +1175,34 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_response(404)
         self.end_headers()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/api/run/cancel":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+        try:
+            body = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": False, "error": "invalid_json"}).encode())
+            return
+        owner = str(body.get("owner") or "").strip()
+        repo = str(body.get("repo") or "").strip()
+        sha = str(body.get("sha") or "").strip()
+        status, out = request_run_cancel(owner, repo, sha)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(out).encode())
 
     def log_message(self, format, *args):
         logger.info("%s - %s", self.address_string(), format % args)

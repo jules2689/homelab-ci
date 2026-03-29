@@ -42,6 +42,14 @@ def init_db(path: Path | None = None) -> None:
             conn.execute("ALTER TABLE runs ADD COLUMN commit_message TEXT NOT NULL DEFAULT ''")
         if not any(c[1] == "started_at" for c in info):
             conn.execute("ALTER TABLE runs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cancel_requests (
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                sha TEXT NOT NULL,
+                PRIMARY KEY (owner, repo, sha)
+            )
+        """)
 
 
 # success: 1=pass, 0=fail, -1=pending, -2=cancelled (e.g. container restarted before job finished)
@@ -95,12 +103,15 @@ def record_run(
     output: str = "",
     branch: str = "main",
     commit_message: str = "",
+    *,
+    cancelled: bool = False,
 ) -> None:
     """Record completed run: update existing pending run for this owner/repo/sha, or insert."""
     path = _db_path()
     init_db(path)
     out = (output or "")[:MAX_OUTPUT_LEN]
     msg = (commit_message or "")[:2048]
+    success_col = CANCELLED if cancelled else (1 if success else 0)
     with sqlite3.connect(path) as conn:
         cur = conn.execute(
             "SELECT id FROM runs WHERE owner=? AND repo=? AND sha=? AND success=? ORDER BY id DESC LIMIT 1",
@@ -111,12 +122,12 @@ def record_run(
             # at = completed_at; started_at stays as set when pending was inserted
             conn.execute(
                 "UPDATE runs SET success=?, html_url=?, at=?, output=?, branch=?, commit_message=? WHERE id=?",
-                (1 if success else 0, html_url or "", at, out, branch or "main", msg, row[0]),
+                (success_col, html_url or "", at, out, branch or "main", msg, row[0]),
             )
         else:
             conn.execute(
                 "INSERT INTO runs (owner, repo, sha, success, html_url, at, output, branch, commit_message, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (owner, repo, sha[:7], 1 if success else 0, html_url or "", at, out, branch or "main", msg, at),
+                (owner, repo, sha[:7], success_col, html_url or "", at, out, branch or "main", msg, at),
             )
 
 
@@ -151,6 +162,32 @@ def get_runs(limit: int = 200) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def is_cancel_requested(owner: str, repo: str, sha: str) -> bool:
+    """True if the web UI (or other client) requested cancellation for this run (7-char sha)."""
+    path = _db_path()
+    if not path.exists():
+        return False
+    init_db(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM cancel_requests WHERE owner=? AND repo=? AND sha=?",
+            (owner, repo, sha[:7]),
+        ).fetchone()
+    return row is not None
+
+
+def clear_cancel_request(owner: str, repo: str, sha: str) -> None:
+    """Remove cancel request row after the job has stopped or finished."""
+    path = _db_path()
+    if not path.exists():
+        return
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "DELETE FROM cancel_requests WHERE owner=? AND repo=? AND sha=?",
+            (owner, repo, sha[:7]),
+        )
 
 
 def mark_pending_run_cancelled(owner: str, repo: str, sha: str) -> None:

@@ -4,7 +4,7 @@ RUN apk add --no-cache util-linux \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py entrypoint.sh github_app.py github_api.py .
+COPY server.py entrypoint.sh github_app.py github_api.py favicon.svg .
 RUN chmod +x /app/entrypoint.sh
 ENV CI_LITE_WEB_PORT=8080
 ENV PUID=0 PGID=0

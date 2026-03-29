@@ -113,3 +113,29 @@ def complete_check_run(
         output_text=output_text,
         token=token,
     )
+
+
+def complete_check_run_cancelled(
+    owner: str,
+    repo: str,
+    check_run_id: int,
+    head_sha: str,
+    output_title: str = "ci-lite",
+    output_summary: str = "Stopped from the CI-Lite web UI.",
+    output_text: str = "",
+    *,
+    token: str,
+) -> dict:
+    """Mark check run as completed with conclusion cancelled (user stopped the job)."""
+    return update_check_run(
+        owner,
+        repo,
+        check_run_id,
+        head_sha,
+        status="completed",
+        conclusion="cancelled",
+        output_title=output_title,
+        output_summary=output_summary,
+        output_text=output_text,
+        token=token,
+    )
