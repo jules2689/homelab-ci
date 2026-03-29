@@ -1,7 +1,11 @@
 """Run a job: clone repo at ref, run command in same process (deps + exec via run-in-repo.sh)."""
+from __future__ import annotations
+
 import os
-import subprocess
 import shutil
+import subprocess
+import threading
+from collections.abc import Callable
 
 
 def get_repo_config(owner: str, repo: str, ref: str, get_file_fn) -> dict:
@@ -32,58 +36,91 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RUN_IN_REPO_SCRIPT = os.environ.get("CI_LITE_RUN_IN_REPO_SCRIPT") or os.path.join(_SCRIPT_DIR, "run-in-repo.sh")
 
 
+def _stream_subprocess(
+    cmd: list[str],
+    cwd: str,
+    on_output: Callable[[str], None] | None,
+) -> tuple[int, str]:
+    """Run cmd with merged stdout/stderr; stream lines to on_output. Returns (returncode, full_output)."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=cwd,
+        text=True,
+        bufsize=1,
+    )
+    chunks: list[str] = []
+
+    def reader() -> None:
+        assert proc.stdout is not None
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                chunks.append(line)
+                if on_output:
+                    on_output(line)
+        finally:
+            proc.stdout.close()
+
+    t = threading.Thread(target=reader)
+    t.start()
+    rc = proc.wait()
+    t.join()
+    return rc, "".join(chunks)
+
+
+def _git_step(
+    label: str,
+    cmd: list[str],
+    cwd: str,
+    on_output: Callable[[str], None] | None,
+) -> str:
+    if on_output:
+        on_output(f"=== ci-lite: {label} ===\n")
+    rc, out = _stream_subprocess(cmd, cwd, on_output)
+    if rc != 0:
+        raise subprocess.CalledProcessError(rc, cmd, out)
+    return out
+
+
 def run_job(
     clone_url: str,
     branch: str,
     sha: str,
     command: str,
     workspace_dir: str,
+    on_output: Callable[[str], None] | None = None,
 ) -> tuple[int, str]:
     """
     Clone repo (branch) into workspace_dir, checkout sha cleanly, run command in same container via run-in-repo.sh.
     clone_url should use the token for private repos.
+    If on_output is set, stdout/stderr are streamed line-by-line (clone, checkout, then job).
     Returns (exit_code, combined_stdout_stderr).
     """
     repo_dir = os.path.join(workspace_dir, "repo")
     if os.path.isdir(repo_dir):
         shutil.rmtree(repo_dir)
     os.makedirs(repo_dir, exist_ok=True)
-    subprocess.run(
+
+    _git_step(
+        "git clone",
         ["git", "clone", "--depth", "50", "--branch", branch, clone_url, repo_dir],
-        check=True,
-        capture_output=True,
-        cwd=workspace_dir,
+        workspace_dir,
+        on_output,
     )
-    subprocess.run(
-        ["git", "checkout", "-f", sha],
-        check=True,
-        capture_output=True,
-        cwd=repo_dir,
-    )
-    subprocess.run(
-        ["git", "reset", "--hard", sha],
-        check=True,
-        capture_output=True,
-        cwd=repo_dir,
-    )
-    subprocess.run(
-        ["git", "clean", "-fd"],
-        check=True,
-        capture_output=True,
-        cwd=repo_dir,
-    )
+    _git_step("git checkout", ["git", "checkout", "-f", sha], repo_dir, on_output)
+    _git_step("git reset", ["git", "reset", "--hard", sha], repo_dir, on_output)
+    _git_step("git clean", ["git", "clean", "-fd"], repo_dir, on_output)
+
+    if on_output:
+        on_output("=== ci-lite: job ===\n")
+
     if os.path.isfile(RUN_IN_REPO_SCRIPT):
-        proc = subprocess.run(
-            [RUN_IN_REPO_SCRIPT, repo_dir, "bash", "-c", command],
-            capture_output=True,
-            text=True,
-        )
+        cmd = [RUN_IN_REPO_SCRIPT, repo_dir, "bash", "-c", command]
+        cwd = workspace_dir
     else:
-        proc = subprocess.run(
-            ["bash", "-c", command],
-            capture_output=True,
-            text=True,
-            cwd=repo_dir,
-        )
-    out = (proc.stdout or "") + (proc.stderr or "")
-    return proc.returncode, out
+        cmd = ["bash", "-c", command]
+        cwd = repo_dir
+
+    rc, out = _stream_subprocess(cmd, cwd, on_output)
+    return rc, out

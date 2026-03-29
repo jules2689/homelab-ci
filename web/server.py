@@ -88,6 +88,26 @@ def _sha7(sha: str) -> str:
     return (sha or "").strip()[:7]
 
 
+def get_run_output(owner: str, repo: str, sha: str) -> dict | None:
+    """Latest run row for owner/repo/sha (7-char). Used to poll live logs while a job is pending."""
+    if not RUNS_DB_PATH.exists() or not owner or not repo or not sha:
+        return None
+    try:
+        with sqlite3.connect(RUNS_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT success, output FROM runs WHERE owner=? AND repo=? AND sha=? ORDER BY id DESC LIMIT 1",
+                (owner, repo, _sha7(sha)),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    s = row["success"]
+    success = None if s == -1 else ("cancelled" if s == -2 else bool(s))
+    return {"success": success, "output": (row["output"] if "output" in row.keys() else "") or ""}
+
+
 def get_stored_commit_message(owner: str, repo: str, sha: str) -> str | None:
     """Return stored commit_message for this run if any. Prefer DB so we skip the API when possible."""
     if not RUNS_DB_PATH.exists() or not owner or not repo or not sha:
@@ -324,15 +344,31 @@ INDEX_HTML = """<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 1rem;
       padding: 1rem 1.25rem;
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
+    }
+    .modal-header-main {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.5rem 1rem;
+      min-width: 0;
+      flex: 1;
     }
     .modal-title {
       font-family: 'JetBrains Mono', monospace;
       font-size: 0.875rem;
       color: var(--text);
       margin: 0;
+    }
+    .modal-state {
+      font-size: 0.6875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      flex-shrink: 0;
     }
     .modal-close {
       background: none;
@@ -350,25 +386,115 @@ INDEX_HTML = """<!DOCTYPE html>
       overflow: auto;
       flex: 1;
       min-height: 0;
+      -webkit-overflow-scrolling: touch;
     }
+    .modal-body::-webkit-scrollbar { width: 8px; height: 8px; }
+    .modal-body::-webkit-scrollbar-track { background: transparent; }
+    .modal-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
     .modal-log {
-      background: var(--log-bg);
-      border: 1px solid var(--log-border);
-      border-radius: var(--radius-sm);
-      padding: 1rem 1.25rem;
+      margin: 0;
       font-family: 'JetBrains Mono', monospace;
       font-size: 0.75rem;
       line-height: 1.5;
       color: var(--muted);
+    }
+    .log-single-wrap,
+    .log-section {
+      background: var(--log-bg);
+      border: 1px solid var(--log-border);
+      border-radius: var(--radius-sm);
+    }
+    .log-section-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.4rem 0.5rem 0.4rem 0.75rem;
+      border-bottom: 1px solid var(--log-border);
+      flex-shrink: 0;
+    }
+    .log-section-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--accent);
+      letter-spacing: 0.02em;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .log-section-title--muted {
+      color: var(--muted);
+      font-weight: 400;
+    }
+    .log-copy-btn {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      color: var(--accent);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.25rem 0.5rem;
+      cursor: pointer;
+      flex-shrink: 0;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .log-copy-btn:hover:not(:disabled) {
+      color: var(--accent-hover);
+      background: var(--surface-hover);
+    }
+    .log-copy-btn:disabled {
+      opacity: 0.7;
+      cursor: default;
+    }
+    .modal-log-single {
       white-space: pre-wrap;
       word-break: break-word;
       margin: 0;
-      max-height: 70vh;
-      overflow: auto;
+      padding: 0.75rem 1rem;
+      overflow: visible;
+      border-radius: 0 0 var(--radius-sm) var(--radius-sm);
     }
-    .modal-log::-webkit-scrollbar { width: 8px; height: 8px; }
-    .modal-log::-webkit-scrollbar-track { background: transparent; }
-    .modal-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .log-single-wrap {
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .modal-log-split {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      align-items: stretch;
+      padding: 0;
+    }
+    .log-section {
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      min-width: 0;
+    }
+    .log-section-body {
+      margin: 0;
+      padding: 0.75rem 1rem;
+      overflow: visible;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .log-section--depth-2 {
+      margin-left: 20px;
+    }
+    .log-section.log-section--depth-2:before, .log-section.log-section--depth-3:before {
+        content: "┗━";
+        margin-left: -20px;
+        line-height: 0;
+    }
+    .log-section--depth-3 {
+      margin-left: 40px;
+    }
     .pagination {
       display: flex;
       align-items: center;
@@ -443,11 +569,14 @@ INDEX_HTML = """<!DOCTYPE html>
   <div id="log-modal" class="modal-backdrop" aria-hidden="true">
     <div class="modal-panel" role="dialog" aria-labelledby="modal-title" onclick="event.stopPropagation()">
       <div class="modal-header">
-        <h2 id="modal-title" class="modal-title"></h2>
+        <div class="modal-header-main">
+          <h2 id="modal-title" class="modal-title"></h2>
+          <span id="modal-state" class="modal-state badge" role="status" aria-live="polite" aria-atomic="true"></span>
+        </div>
         <button type="button" class="modal-close" aria-label="Close" id="modal-close">&times;</button>
       </div>
-      <div class="modal-body">
-        <pre id="modal-log" class="modal-log"></pre>
+      <div class="modal-body" id="modal-body">
+        <div id="modal-log" class="modal-log" role="region" aria-label="Job log output"></div>
       </div>
     </div>
   </div>
@@ -460,14 +589,216 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     var backdrop = document.getElementById('log-modal');
     var modalTitle = document.getElementById('modal-title');
+    var modalState = document.getElementById('modal-state');
     var modalLog = document.getElementById('modal-log');
-    function openLog(title, text) {
+    var modalBody = document.getElementById('modal-body');
+    var logPollTimer = null;
+    var liveLogStickNextPoll = false;
+    var livePollLastRenderedOutput = null;
+    /* Split on ATX headings: # / ## / ### at line start — title becomes section header. */
+    function copyLogText(text, btn) {
+      var label = (btn && btn.dataset && btn.dataset.label) ? btn.dataset.label : 'Copy';
+      function feedback(ok) {
+        if (!btn) return;
+        if (ok) {
+          btn.textContent = 'Copied';
+          btn.disabled = true;
+          setTimeout(function() {
+            btn.textContent = label;
+            btn.disabled = false;
+          }, 1600);
+        }
+      }
+      var t = text == null ? '' : String(text);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(function() { feedback(true); }).catch(function() { copyFallback(t, btn, label, feedback); });
+      } else {
+        copyFallback(t, btn, label, feedback);
+      }
+    }
+    function copyFallback(text, btn, label, feedback) {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        feedback(true);
+      } catch (e) {
+        if (btn) btn.textContent = 'Failed';
+        setTimeout(function() { if (btn) btn.textContent = label; }, 1600);
+      }
+    }
+    function makeLogToolbar(titleText, bodyText, options) {
+      options = options || {};
+      var bar = document.createElement('div');
+      bar.className = 'log-section-toolbar';
+      var titleSpan = document.createElement('span');
+      titleSpan.className = 'log-section-title';
+      if (titleText) {
+        titleSpan.textContent = titleText;
+      } else {
+        titleSpan.textContent = '\u2014';
+        titleSpan.classList.add('log-section-title--muted');
+        titleSpan.title = 'Output before first # / ## / ### heading';
+      }
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'log-copy-btn';
+      btn.textContent = 'Copy';
+      btn.dataset.label = 'Copy';
+      btn.setAttribute('aria-label', options.copyLabel || ('Copy' + (titleText ? ': ' + titleText : ' log')));
+      btn.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        copyLogText(bodyText, btn);
+      });
+      bar.appendChild(titleSpan);
+      bar.appendChild(btn);
+      return bar;
+    }
+    function parseLogHeadingTitle(line) {
+      var t = line.replace(/\\r$/, '').replace(/\\s+#*\\s*$/, '').trim();
+      return t;
+    }
+    function parseLogSections(raw) {
+      if (raw == null || raw === '') return null;
+      var re = /^(#{1,3})\s+(.+)$/gm;
+      var matches = [];
+      var m;
+      while ((m = re.exec(raw)) !== null) {
+        matches.push({
+          index: m.index,
+          len: m[0].length,
+          depth: m[1].length,
+          title: parseLogHeadingTitle(m[2]),
+        });
+      }
+      if (matches.length === 0) return null;
+      var sections = [];
+      var firstIdx = matches[0].index;
+      if (firstIdx > 0) {
+        var lead = raw.slice(0, firstIdx).replace(/\s+$/, '');
+        if (lead) sections.push({ title: '', body: lead, depth: 0 });
+      }
+      for (var i = 0; i < matches.length; i++) {
+        var start = matches[i].index + matches[i].len;
+        var end = i + 1 < matches.length ? matches[i + 1].index : raw.length;
+        var body = raw.slice(start, end);
+        if (body.charAt(0) === '\\n' || body.charAt(0) === '\\r') body = body.replace(/^\\r?\\n/, '');
+        body = body.replace(/\s+$/, '');
+        sections.push({ title: matches[i].title, body: body, depth: matches[i].depth });
+      }
+      return sections;
+    }
+    function renderModalLog(text) {
+      modalLog.innerHTML = '';
+      modalLog.className = 'modal-log';
+      var sections = parseLogSections(text);
+      var raw = text == null ? '' : String(text);
+      if (!sections) {
+        var outer = document.createElement('div');
+        outer.className = 'log-single-wrap';
+        outer.appendChild(makeLogToolbar('Output', raw, { copyLabel: 'Copy full log' }));
+        var pre = document.createElement('pre');
+        pre.className = 'modal-log-single';
+        pre.textContent = raw;
+        outer.appendChild(pre);
+        modalLog.appendChild(outer);
+        return;
+      }
+      modalLog.classList.add('modal-log-split');
+      sections.forEach(function(sec) {
+        var wrap = document.createElement('div');
+        wrap.className = 'log-section';
+        if (sec.depth === 2) wrap.classList.add('log-section--depth-2');
+        if (sec.depth === 3) wrap.classList.add('log-section--depth-3');
+        wrap.appendChild(makeLogToolbar(sec.title, sec.body, { copyLabel: sec.title ? 'Copy: ' + sec.title : 'Copy section' }));
+        var pre = document.createElement('pre');
+        pre.className = 'log-section-body';
+        pre.textContent = sec.body;
+        wrap.appendChild(pre);
+        modalLog.appendChild(wrap);
+      });
+    }
+    function scrollLogToEnd() {
+      if (modalBody) modalBody.scrollTop = modalBody.scrollHeight;
+    }
+    /** True if the log modal body is scrolled to (or near) the bottom — used to follow tail without fighting manual scroll-up. */
+    function isLogModalNearBottom() {
+      if (!modalBody) return true;
+      var slack = 100;
+      return modalBody.scrollHeight - modalBody.scrollTop - modalBody.clientHeight <= slack;
+    }
+    function scheduleScrollLogToEnd() {
+      requestAnimationFrame(function() {
+        requestAnimationFrame(scrollLogToEnd);
+      });
+    }
+    /** success: null/undefined = running, true/false = pass/fail, 'cancelled' */
+    function setModalRunState(success) {
+      if (!modalState) return;
+      modalState.className = 'modal-state badge';
+      if (success === null || success === undefined) {
+        modalState.textContent = 'Running';
+        modalState.classList.add('pending');
+      } else if (success === 'cancelled') {
+        modalState.textContent = 'Cancelled';
+        modalState.classList.add('cancelled');
+      } else if (success === true) {
+        modalState.textContent = 'Success';
+        modalState.classList.add('pass');
+      } else {
+        modalState.textContent = 'Failed';
+        modalState.classList.add('fail');
+      }
+    }
+    function openLog(title, text, pending, owner, repo, sha, runSuccess) {
       modalTitle.textContent = title;
-      modalLog.textContent = text || '';
+      setModalRunState(pending ? null : runSuccess);
+      renderModalLog(text);
       backdrop.classList.add('is-open');
       backdrop.setAttribute('aria-hidden', 'false');
+      liveLogStickNextPoll = !!pending;
+      scheduleScrollLogToEnd();
+      if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+      if (pending && owner && repo && sha) {
+        livePollLastRenderedOutput = text == null ? '' : String(text);
+        function poll() {
+          fetch('/api/run/output?owner=' + encodeURIComponent(owner) + '&repo=' + encodeURIComponent(repo) + '&sha=' + encodeURIComponent(sha))
+            .then(function(res) {
+              if (!res.ok) return null;
+              return res.json();
+            })
+            .then(function(o) {
+              if (!o) return;
+              setModalRunState(o.success);
+              var followTail = isLogModalNearBottom() || liveLogStickNextPoll;
+              if (liveLogStickNextPoll) liveLogStickNextPoll = false;
+              var out = o.output != null ? String(o.output) : '';
+              if (out !== livePollLastRenderedOutput) {
+                livePollLastRenderedOutput = out;
+                renderModalLog(o.output != null ? o.output : '');
+                if (followTail) scheduleScrollLogToEnd();
+              }
+              var done = o.success !== null && o.success !== undefined;
+              if (done && logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+            })
+            .catch(function() {});
+        }
+        poll();
+        logPollTimer = setInterval(poll, 5000);
+      } else {
+        livePollLastRenderedOutput = null;
+      }
     }
     function closeLog() {
+      if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+      livePollLastRenderedOutput = null;
       backdrop.classList.remove('is-open');
       backdrop.setAttribute('aria-hidden', 'true');
     }
@@ -520,14 +851,15 @@ INDEX_HTML = """<!DOCTYPE html>
     function renderRun(r, t) {
       var tr = document.createElement('tr');
       var logCell = document.createElement('td');
-      if (r.output != null && r.output !== '') {
+      var pending = r.success === null || r.success === undefined;
+      if (pending || (r.output != null && r.output !== '')) {
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'btn-log';
-        btn.textContent = 'View log';
+        btn.textContent = pending ? 'View live log' : 'View log';
         btn.addEventListener('click', function(ev) {
           ev.preventDefault();
-          openLog((r.owner || '') + '/' + (r.repo || '') + ' @ ' + (r.sha || ''), r.output);
+          openLog((r.owner || '') + '/' + (r.repo || '') + ' @ ' + (r.sha || ''), r.output || '', pending, r.owner, r.repo, r.sha, r.success);
         });
         logCell.appendChild(btn);
       } else {
@@ -665,6 +997,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(load_runs(page=page, per_page=per_page, skip_count=skip_count)).encode())
+            return
+        if self.path.startswith("/api/run/output"):
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            owner = (qs.get("owner") or [""])[0].strip()
+            repo = (qs.get("repo") or [""])[0].strip()
+            sha = (qs.get("sha") or [""])[0].strip()
+            data = get_run_output(owner, repo, sha)
+            if data is None:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "not found"}).encode())
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
             return
         if self.path.startswith("/api/commit"):
             parsed = urllib.parse.urlparse(self.path)

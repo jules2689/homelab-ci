@@ -68,6 +68,23 @@ def record_pending_run(
         )
 
 
+def update_pending_run_output(owner: str, repo: str, sha: str, output: str) -> None:
+    """Update stored log text for the current in-progress run (success=pending). No-op if no matching row."""
+    path = _db_path()
+    if not path.exists():
+        return
+    init_db(path)
+    out = (output or "")[:MAX_OUTPUT_LEN]
+    with sqlite3.connect(path) as conn:
+        cur = conn.execute(
+            "SELECT id FROM runs WHERE owner=? AND repo=? AND sha=? AND success=? ORDER BY id DESC LIMIT 1",
+            (owner, repo, sha[:7], PENDING),
+        )
+        row = cur.fetchone()
+        if row:
+            conn.execute("UPDATE runs SET output=? WHERE id=?", (out, row[0]))
+
+
 def record_run(
     owner: str,
     repo: str,

@@ -11,7 +11,9 @@ RUN apk add --no-cache \
     python3 \
     py3-pip \
     bash \
-    util-linux
+    util-linux \
+    yaml-dev \
+    strace
 
 RUN gem install bundler --no-document 2>/dev/null || true
 
@@ -19,7 +21,8 @@ WORKDIR /app
 COPY requirements.txt .
 ENV PIP_ROOT_USER_ACTION=ignore
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt \
+    && python -c "import yaml; assert yaml.__with_libyaml__, 'PyYAML must be built with libyaml C bindings'"
 COPY . .
 RUN chmod +x /app/run-in-repo.sh /app/entrypoint.sh
 

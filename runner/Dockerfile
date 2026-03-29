@@ -9,7 +9,8 @@ RUN apk add --no-cache \
     build-base \
     python3 \
     py3-pip \
-    bash
+    bash \
+    strace
 
 # Alpine 3.19: ruby 3.3, python 3.12
 RUN gem install bundler --no-document 2>/dev/null || true

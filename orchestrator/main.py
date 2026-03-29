@@ -21,6 +21,7 @@ from runs_db import (
     init_db,
     record_run as db_record_run,
     record_pending_run as db_record_pending_run,
+    update_pending_run_output,
     get_pending_runs,
     mark_pending_run_cancelled,
     archive_runs_older_than,
@@ -63,6 +64,33 @@ def save_state(state):
 
 def build_clone_url(owner: str, repo: str, *, token: str) -> str:
     return f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+
+
+class _PendingLogStream:
+    """Accumulate job log and persist to the pending run row (throttled). GitHub is not updated here."""
+
+    def __init__(self, owner: str, repo: str, sha: str) -> None:
+        self.owner = owner
+        self.repo = repo
+        self.sha = sha
+        self._buf = ""
+        self._last_flush = time.monotonic()
+        self._interval_s = float(os.environ.get("CI_LITE_LOG_FLUSH_INTERVAL", "0.35"))
+        self._max_chars = int(os.environ.get("CI_LITE_LOG_FLUSH_CHARS", "6144"))
+
+    def push(self, chunk: str) -> None:
+        self._buf += chunk
+        now = time.monotonic()
+        if len(self._buf) >= self._max_chars or (now - self._last_flush) >= self._interval_s:
+            self.flush()
+
+    def flush(self) -> None:
+        update_pending_run_output(self.owner, self.repo, self.sha, self._buf)
+        self._last_flush = time.monotonic()
+
+    @property
+    def text(self) -> str:
+        return self._buf
 
 
 def _commit_message_first_line(commit: dict, *, owner: str, repo: str, token: str) -> str:
@@ -121,6 +149,7 @@ def run_one(
     os.makedirs(workspace_dir, exist_ok=True)
 
     logger.info("Starting job %s/%s @ %s (command: %s)", owner, repo, sha[:7], command)
+    log_stream = _PendingLogStream(owner, repo, sha)
     try:
         exit_code, output = run_job(
             clone_url=clone_url,
@@ -128,11 +157,16 @@ def run_one(
             sha=sha,
             command=command,
             workspace_dir=workspace_dir,
+            on_output=log_stream.push,
         )
     except Exception as e:
         logger.exception("Job failed for %s/%s @ %s", owner, repo, sha[:7])
-        output = str(e)
+        log_stream.push("\n=== ci-lite: exception ===\n")
+        log_stream.push(str(e) + "\n")
+        output = log_stream.text
         exit_code = 1
+    finally:
+        log_stream.flush()
 
     run_output = output or "(no output)"
     check_summary = ("Success. Ran: `%s`" if exit_code == 0 else "Failed. Ran: `%s`") % command
