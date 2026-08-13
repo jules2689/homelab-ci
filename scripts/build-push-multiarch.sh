@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build and push multi-platform (amd64 + arm64) images for homelab-ci and homelab-ci-web.
+# Build and push multi-platform (amd64 + arm64) CI-Lite images.
 # Usage: ./scripts/build-push-multiarch.sh [VERSION]
-# Example: ./scripts/build-push-multiarch.sh 0.1.15
+# Example: ./scripts/build-push-multiarch.sh 0.2.0
 
 set -e
 
-VERSION="${1:-0.1.15}"
+VERSION="${1:-0.2.0}"
 REGISTRY="${CI_LITE_REGISTRY:-registry.hl.jnadeau.ca}"
 PLATFORMS="linux/amd64,linux/arm64"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,6 +33,15 @@ docker buildx build \
   -f "${ROOT}/web/Dockerfile" \
   "${ROOT}/web"
 
+echo "Building and pushing homelab-ci-mcp:${VERSION} for ${PLATFORMS}..."
+docker buildx build \
+  --platform "$PLATFORMS" \
+  -t "${REGISTRY}/homelab-ci-mcp:${VERSION}" \
+  --push \
+  -f "${ROOT}/mcp_server/Dockerfile" \
+  "${ROOT}"
+
 echo "Done. Images pushed:"
 echo "  ${REGISTRY}/homelab-ci:${VERSION}"
 echo "  ${REGISTRY}/homelab-ci-web:${VERSION}"
+echo "  ${REGISTRY}/homelab-ci-mcp:${VERSION}"

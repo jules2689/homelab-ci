@@ -86,6 +86,14 @@ So the image stays small and dependency sets stay per-repo.
 
 - **GitHub**: Each run creates/updates a **Check run** on the commit. Logs and pass/fail are in the GitHub UI (commit/PR checks).
 - **Web UI** (optional): Simple page listing recent runs with links to the GitHub check run. Start with `docker compose --profile web up -d` and open `http://localhost:8080`.
+- **MCP server**: Read-only tools for agents to list jobs for a repository and commit, then read a job's stored logs. Start it with `docker compose up -d mcp` and connect an MCP client to `http://localhost:8090/mcp` (use the host's address instead of `localhost` from another machine).
+
+### MCP tools
+
+- `list_jobs(repository, commit_sha)` — accepts `repository` as `owner/repo` and a full or abbreviated commit SHA. It returns matching attempts newest-first, including the stable job ID, status, timestamps, GitHub URL, and whether logs are available.
+- `read_job_logs(job_id, offset=0, limit=20000)` — reads a bounded log chunk. When `truncated` is true, pass `next_offset` as the next call's `offset`.
+
+The MCP service mounts the run database read-only and listens on `0.0.0.0:8090`. It does not provide authentication, so expose it only on a trusted network or put authentication in front of it at the reverse proxy.
 
 ## Dry-run
 
@@ -116,6 +124,8 @@ Only **new** commits are considered: branches we’ve never seen are skipped (no
 | `CI_LITE_DB` | Path to SQLite DB for run history (default: `$CI_LITE_DATA_DIR/runs.db`). Web UI reads from this. |
 | `CI_LITE_WORKSPACE` | Dir for clone + run (default: `$CI_LITE_DATA_DIR/workspace`). |
 | `CI_LITE_WEB_PORT` | Web UI port (default: `8080`). |
+| `CI_LITE_MCP_HOST` | MCP listen address (default: `0.0.0.0`). |
+| `CI_LITE_MCP_PORT` | MCP Streamable HTTP port (default: `8090`; endpoint `/mcp`). |
 
 ## Cost / resource use
 
