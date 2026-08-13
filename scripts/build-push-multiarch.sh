@@ -9,13 +9,14 @@ VERSION="${1:-0.2.0}"
 REGISTRY="${CI_LITE_REGISTRY:-registry.hl.jnadeau.ca}"
 PLATFORMS="linux/amd64,linux/arm64"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILDER="${CI_LITE_BUILDX_BUILDER:-ci-lite-multiarch-host}"
 
-# Ensure buildx builder exists and supports multi-platform
-if ! docker buildx inspect ci-lite-multiarch &>/dev/null; then
-  echo "Creating buildx builder ci-lite-multiarch..."
-  docker buildx create --name ci-lite-multiarch --use --driver docker-container
+# Use host networking so BuildKit can reach registries on private/Tailscale routes.
+if ! docker buildx inspect "$BUILDER" &>/dev/null; then
+  echo "Creating buildx builder ${BUILDER}..."
+  docker buildx create --name "$BUILDER" --use --driver docker-container --driver-opt network=host
 fi
-docker buildx use ci-lite-multiarch
+docker buildx use "$BUILDER"
 
 echo "Building and pushing homelab-ci:${VERSION} for ${PLATFORMS}..."
 docker buildx build \
