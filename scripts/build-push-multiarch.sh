@@ -6,7 +6,7 @@
 set -e
 
 VERSION="${1:-0.2.0}"
-REGISTRY="${CI_LITE_REGISTRY:-registry.hl.jnadeau.ca:8443}"
+REGISTRY="${CI_LITE_REGISTRY:-git.hl.jnadeau.ca:8443}"
 PLATFORMS="linux/amd64,linux/arm64"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILDER="${CI_LITE_BUILDX_BUILDER:-ci-lite-multiarch-host}"
