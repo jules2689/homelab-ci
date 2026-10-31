@@ -4,6 +4,8 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 
+from github_app import urlopen_for_repo
+
 
 def _read_error_body(exc: urllib.error.HTTPError) -> str:
     """Read error response body; GitHub returns JSON with 'message' and sometimes 'documentation_url'."""
@@ -20,7 +22,7 @@ API_BASE = "https://api.github.com"
 API_VERSION = "2022-11-28"
 
 
-def _req(method, path, body=None, *, token: str):
+def _req(method, path, body=None, *, owner: str, repo: str, token: str):
     url = f"{API_BASE}{path}"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -33,7 +35,7 @@ def _req(method, path, body=None, *, token: str):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urlopen_for_repo(req, owner, repo, token=token) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         detail = _read_error_body(e)
@@ -49,7 +51,7 @@ def create_check_run(owner: str, repo: str, head_sha: str, name: str = "ci-lite"
         "started_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "output": {"title": name, "summary": "Running...", "text": ""},
     }
-    return _req("POST", f"/repos/{owner}/{repo}/check-runs", body, token=token)
+    return _req("POST", f"/repos/{owner}/{repo}/check-runs", body, owner=owner, repo=repo, token=token)
 
 
 def update_check_run(
@@ -84,7 +86,7 @@ def update_check_run(
         if output_text is not None:
             # GitHub has a 65535 character limit for output.text; send as markdown so **Command:** / **Output:** and code blocks render
             body["output"]["text"] = output_text[-65535:] if len(output_text) > 65535 else output_text
-    return _req("PATCH", f"/repos/{owner}/{repo}/check-runs/{check_run_id}", body, token=token)
+    return _req("PATCH", f"/repos/{owner}/{repo}/check-runs/{check_run_id}", body, owner=owner, repo=repo, token=token)
 
 
 def complete_check_run(

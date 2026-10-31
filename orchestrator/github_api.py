@@ -5,6 +5,8 @@ import urllib.request
 import urllib.parse
 import urllib.error
 
+from github_app import urlopen_for_repo
+
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.github.com"
@@ -23,7 +25,7 @@ def get_commit(owner: str, repo: str, ref: str, *, token: str) -> dict | None:
     }
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+        with urlopen_for_repo(req, owner, repo, token=token, timeout=_REQUEST_TIMEOUT) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         logger.warning("Get commit failed for %s/%s ref %s: %s", owner, repo, ref[:7], e.code)
@@ -51,7 +53,7 @@ def get_commits_between(owner: str, repo: str, base_sha: str, head_sha: str, *, 
         req_url = f"{url}?per_page={per_page}&page={page}"
         req = urllib.request.Request(req_url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+            with urlopen_for_repo(req, owner, repo, token=token, timeout=_REQUEST_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -83,7 +85,7 @@ def get_latest_commit(owner: str, repo: str, branch: str, *, token: str) -> dict
     }
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+        with urlopen_for_repo(req, owner, repo, token=token, timeout=_REQUEST_TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
             if isinstance(data, list) and len(data) > 0:
                 return data[0]
@@ -114,7 +116,7 @@ def get_file(owner: str, repo: str, ref: str, path: str, *, token: str) -> str |
     }
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+        with urlopen_for_repo(req, owner, repo, token=token, timeout=_REQUEST_TIMEOUT) as resp:
             return resp.read().decode()
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -136,7 +138,7 @@ def list_branches(owner: str, repo: str, per_page: int = 100, *, token: str) -> 
         }
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+            with urlopen_for_repo(req, owner, repo, token=token, timeout=_REQUEST_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             logger.warning("Branches API failed for %s/%s: %s %s", owner, repo, e.code, e.reason)

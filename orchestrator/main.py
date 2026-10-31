@@ -145,6 +145,7 @@ def run_one(
         commit_message=commit_message,
     )
 
+    token = get_installation_token_for_repo(owner, repo)
     clone_url = build_clone_url(owner, repo, token=token)
     # Repo copy under WORKSPACE_ROOT (e.g. /data/workspace when in Docker); job runs in that copy at exact commit
     workspace_dir = os.path.join(WORKSPACE_ROOT, f"{owner}_{repo}")
@@ -188,52 +189,51 @@ def run_one(
     run_output = output or "(no output)"
     completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     check_text = "**Command:** `%s`\n\n%s" % (command, run_output)
-    if cancelled_run:
-        complete_check_run_cancelled(
-            owner=owner,
-            repo=repo,
-            check_run_id=check_run_id,
-            head_sha=sha,
-            output_title="ci-lite",
-            output_summary="Stopped from the CI-Lite web UI.",
-            output_text=check_text,
-            token=token,
-        )
-        db_record_run(
-            owner=owner,
-            repo=repo,
-            sha=sha,
-            success=False,
-            html_url=html_url,
-            at=completed_at,
-            output=run_output,
-            branch=branch,
-            commit_message=commit_message,
-            cancelled=True,
-        )
-    else:
-        check_summary = ("Success. Ran: `%s`" if exit_code == 0 else "Failed. Ran: `%s`") % command
-        complete_check_run(
-            owner=owner,
-            repo=repo,
-            check_run_id=check_run_id,
-            head_sha=sha,
-            success=(exit_code == 0),
-            output_title="ci-lite",
-            output_summary=check_summary,
-            output_text=check_text,
-            token=token,
-        )
-        db_record_run(
-            owner=owner,
-            repo=repo,
-            sha=sha,
-            success=(exit_code == 0),
-            html_url=html_url,
-            at=completed_at,
-            output=run_output,
-            branch=branch,
-            commit_message=commit_message,
+    # Persist execution before publishing so a GitHub outage cannot leave an
+    # executed job pending or prevent the polling loop from advancing its state.
+    db_record_run(
+        owner=owner,
+        repo=repo,
+        sha=sha,
+        success=(exit_code == 0 and not cancelled_run),
+        html_url=html_url,
+        at=completed_at,
+        output=run_output,
+        branch=branch,
+        commit_message=commit_message,
+        cancelled=cancelled_run,
+    )
+    try:
+        if cancelled_run:
+            complete_check_run_cancelled(
+                owner=owner,
+                repo=repo,
+                check_run_id=check_run_id,
+                head_sha=sha,
+                output_title="ci-lite",
+                output_summary="Stopped from the CI-Lite web UI.",
+                output_text=check_text,
+                token=token,
+            )
+        else:
+            check_summary = ("Success. Ran: `%s`" if exit_code == 0 else "Failed. Ran: `%s`") % command
+            complete_check_run(
+                owner=owner,
+                repo=repo,
+                check_run_id=check_run_id,
+                head_sha=sha,
+                success=(exit_code == 0),
+                output_title="ci-lite",
+                output_summary=check_summary,
+                output_text=check_text,
+                token=token,
+            )
+    except Exception as exc:
+        # Publication failure must not rerun a completed command. Avoid logging
+        # response bodies or exception text that could contain credentials.
+        logger.error(
+            "GitHub check %s publication failed for %s/%s @ %s (%s, status=%s); job result saved",
+            check_run_id, owner, repo, sha[:7], type(exc).__name__, getattr(exc, "code", "unknown"),
         )
     return html_url
 

@@ -59,16 +59,10 @@ def _load_private_key():
     if not pem:
         return None
     if "-----BEGIN" not in pem or "PRIVATE KEY" not in pem:
-        preview = pem[:60].replace("\n", "\\n") if pem else "(empty)"
-        logger.error(
-            "GitHub App key invalid: got %d chars, starts with: %r",
-            len(pem),
-            preview,
-        )
+        logger.error("GitHub App key invalid: expected a PEM private key (%d chars)", len(pem))
         raise ValueError(
             "GitHub App private key must be PEM (-----BEGIN ... PRIVATE KEY-----). "
-            "Got %d chars starting with %r. Check GITHUB_APP_PRIVATE_KEY or GITHUB_APP_KEY_PATH."
-            % (len(pem), preview)
+            "Check GITHUB_APP_PRIVATE_KEY or GITHUB_APP_KEY_PATH."
         )
     try:
         return load_pem_private_key(pem.encode("utf-8"), password=None)
@@ -144,6 +138,31 @@ def get_installation_token_for_repo(owner: str, repo: str) -> str:
     """Return an installation access token for the given repo. Cached and refreshed as needed."""
     installation_id = _get_installation_id(owner, repo)
     return _get_installation_token(installation_id)
+
+
+def urlopen_for_repo(request, owner: str, repo: str, *, token: str, timeout: int = _REQUEST_TIMEOUT):
+    """Refresh cached installation auth at request time and retry one rejected token.
+
+    Callers can retain their token while a job runs. Resolve the cache again here
+    so a long-running job or batch cannot keep using an expired token string.
+    """
+    installation_id = _installation_id_cache.get((owner, repo))
+    if installation_id is not None:
+        token = _get_installation_token(installation_id)
+    request.add_header("Authorization", f"Bearer {token}")
+    try:
+        return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            raise
+        exc.close()
+    # A token can be revoked before its advertised expiry. Do not retry other
+    # errors or retry the job: only repeat this exact API request once.
+    installation_id = _get_installation_id(owner, repo)
+    _token_cache.pop(installation_id, None)
+    token = _get_installation_token(installation_id)
+    request.add_header("Authorization", f"Bearer {token}")
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 def is_github_app_configured() -> bool:
