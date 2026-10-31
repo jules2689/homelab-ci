@@ -6,7 +6,8 @@
 set -e
 
 VERSION="${1:-0.2.0}"
-REGISTRY="${CI_LITE_REGISTRY:-git.hl.jnadeau.ca:8443}"
+REGISTRY="${CI_LITE_REGISTRY:-git.hl.jnadeau.ca}"
+IMAGE_OWNER="${CI_LITE_IMAGE_OWNER:-homelab}"
 PLATFORMS="linux/amd64,linux/arm64"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILDER="${CI_LITE_BUILDX_BUILDER:-ci-lite-multiarch-host}"
@@ -21,7 +22,7 @@ docker buildx use "$BUILDER"
 echo "Building and pushing homelab-ci:${VERSION} for ${PLATFORMS}..."
 docker buildx build \
   --platform "$PLATFORMS" \
-  -t "${REGISTRY}/homelab-ci:${VERSION}" \
+  -t "${REGISTRY}/${IMAGE_OWNER}/homelab-ci:${VERSION}" \
   --push \
   -f "${ROOT}/orchestrator/Dockerfile" \
   "${ROOT}/orchestrator"
@@ -29,7 +30,7 @@ docker buildx build \
 echo "Building and pushing homelab-ci-web:${VERSION} for ${PLATFORMS}..."
 docker buildx build \
   --platform "$PLATFORMS" \
-  -t "${REGISTRY}/homelab-ci-web:${VERSION}" \
+  -t "${REGISTRY}/${IMAGE_OWNER}/homelab-ci-web:${VERSION}" \
   --push \
   -f "${ROOT}/web/Dockerfile" \
   "${ROOT}/web"
@@ -37,12 +38,12 @@ docker buildx build \
 echo "Building and pushing homelab-ci-mcp:${VERSION} for ${PLATFORMS}..."
 docker buildx build \
   --platform "$PLATFORMS" \
-  -t "${REGISTRY}/homelab-ci-mcp:${VERSION}" \
+  -t "${REGISTRY}/${IMAGE_OWNER}/homelab-ci-mcp:${VERSION}" \
   --push \
   -f "${ROOT}/mcp_server/Dockerfile" \
   "${ROOT}"
 
 echo "Done. Images pushed:"
-echo "  ${REGISTRY}/homelab-ci:${VERSION}"
-echo "  ${REGISTRY}/homelab-ci-web:${VERSION}"
-echo "  ${REGISTRY}/homelab-ci-mcp:${VERSION}"
+echo "  ${REGISTRY}/${IMAGE_OWNER}/homelab-ci:${VERSION}"
+echo "  ${REGISTRY}/${IMAGE_OWNER}/homelab-ci-web:${VERSION}"
+echo "  ${REGISTRY}/${IMAGE_OWNER}/homelab-ci-mcp:${VERSION}"

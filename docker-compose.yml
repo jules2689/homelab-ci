@@ -3,7 +3,7 @@
 
 services:
   orchestrator:
-    image: git.hl.jnadeau.ca/homelab-ci:0.2.0
+    image: git.hl.jnadeau.ca/homelab/homelab-ci:0.2.0
     working_dir: /app
     volumes:
       - ./config.yaml:/app/config.yaml:ro
@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: git.hl.jnadeau.ca/homelab-ci-web:0.2.0
+    image: git.hl.jnadeau.ca/homelab/homelab-ci-web:0.2.0
     working_dir: /app
     volumes:
       - ./web:/app
@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
 
   mcp:
-    image: git.hl.jnadeau.ca/homelab-ci-mcp:0.2.0
+    image: git.hl.jnadeau.ca/homelab/homelab-ci-mcp:0.2.0
     build:
       context: .
       dockerfile: mcp_server/Dockerfile
