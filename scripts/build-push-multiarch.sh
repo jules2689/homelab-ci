@@ -5,7 +5,7 @@
 
 set -e
 
-VERSION="${1:-0.2.0}"
+VERSION="${VERSION:-0.2.1}"
 REGISTRY="${CI_LITE_REGISTRY:-git.hl.jnadeau.ca}"
 IMAGE_OWNER="${CI_LITE_IMAGE_OWNER:-homelab}"
 PLATFORMS="linux/amd64,linux/arm64"
